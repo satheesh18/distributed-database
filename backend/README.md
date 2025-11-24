@@ -40,8 +40,9 @@ This system provides:
 
 2. **Coordinator** (FastAPI)
    - Single entry point for all SQL queries
-   - Routes writes to master, reads to replicas
-   - Coordinates timestamp assignment and replication
+   - Routes writes to master with quorum-based replication
+   - Routes reads to best available replica (lowest latency, minimal lag)
+   - Coordinates timestamp assignment and **manual replication** (no binlog)
 
 3. **Timestamp Service** (2 containers)
    - Server 1: Assigns odd numbers (1, 3, 5, ...)
@@ -128,7 +129,7 @@ Response:
     }
   ],
   "rows_affected": 1,
-  "executed_on": "mysql-master"
+  "executed_on": "mysql-replica-3"
 }
 ```
 
@@ -335,7 +336,8 @@ backend/
 
 ## Implementation Notes
 
-- **Custom Replication**: We implement our own replication logic instead of using MySQL binlog
+- **Custom Replication**: The coordinator (logical layer) manually replicates writes to replicas - we do NOT use MySQL binlog. This gives us full control over replication logic and timestamp ordering.
+- **Intelligent Read Routing**: Reads are routed to the best available replica based on latency and replication lag, reducing load on the master and improving read performance.
 - **Strong Consistency**: Achieved through quorum-based writes (majority of replicas must confirm)
 - **Simplified Algorithms**: Core concepts implemented for educational purposes
 - **Minimal Dependencies**: Uses standard Python libraries and FastAPI

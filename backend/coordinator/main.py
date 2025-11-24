@@ -308,12 +308,79 @@ async def handle_write_query(query: str) -> QueryResponse:
     )
 
 
+async def get_best_replica_for_read() -> str:
+    """
+    Select the best replica for read operations based on metrics.
+    
+    Selects replica with:
+    - Low latency
+    - Low or zero replication lag
+    - Healthy status
+    
+    Falls back to master if no suitable replica found.
+    
+    Returns:
+        Host address of best replica or master
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{METRICS_COLLECTOR_URL}/metrics", timeout=5.0)
+            response.raise_for_status()
+            data = response.json()
+            replicas = data.get("replicas", [])
+        
+        if not replicas:
+            # No replicas available, use master
+            with state_lock:
+                return current_master
+        
+        # Filter healthy replicas with acceptable lag (< 5 timestamps behind)
+        suitable_replicas = [
+            r for r in replicas 
+            if r["is_healthy"] and r["replication_lag"] < 5
+        ]
+        
+        if not suitable_replicas:
+            # No suitable replicas, use master
+            with state_lock:
+                return current_master
+        
+        # Sort by latency (ascending - lowest latency first)
+        suitable_replicas.sort(key=lambda x: x["latency_ms"])
+        
+        # Select the best replica (lowest latency)
+        best_replica_id = suitable_replicas[0]["replica_id"]
+        
+        # Get host for this replica
+        best_replica_host = next(
+            (r["host"] for r in MYSQL_REPLICAS if r["id"] == best_replica_id),
+            None
+        )
+        
+        if best_replica_host:
+            return best_replica_host
+        else:
+            # Fallback to master
+            with state_lock:
+                return current_master
+    
+    except Exception as e:
+        print(f"Error selecting best replica: {e}")
+        # Fallback to master on error
+        with state_lock:
+            return current_master
+
+
 async def handle_read_query(query: str) -> QueryResponse:
     """
     Handle a read query (SELECT).
     
-    Routes to an up-to-date replica or master.
-    For simplicity, we route to master for strong consistency.
+    Routes to the best available replica based on:
+    - Latency (lower is better)
+    - Replication lag (lower is better)
+    - Health status (must be healthy)
+    
+    Falls back to master if no suitable replica is available.
     
     Args:
         query: SQL read query
@@ -321,23 +388,30 @@ async def handle_read_query(query: str) -> QueryResponse:
     Returns:
         QueryResponse with query results
     """
-    global current_master
+    # Select best replica for read
+    read_host = await get_best_replica_for_read()
     
-    with state_lock:
-        master_host = current_master
-    
-    # Execute on master for strong consistency
-    result = execute_query_on_host(master_host, query)
+    # Execute on selected host
+    result = execute_query_on_host(read_host, query)
     
     if not result["success"]:
-        raise HTTPException(status_code=500, detail=f"Query failed: {result.get('error')}")
+        # If read fails on replica, try master as fallback
+        print(f"Read failed on {read_host}, trying master")
+        with state_lock:
+            master_host = current_master
+        
+        result = execute_query_on_host(master_host, query)
+        read_host = master_host
+        
+        if not result["success"]:
+            raise HTTPException(status_code=500, detail=f"Query failed: {result.get('error')}")
     
     return QueryResponse(
         success=True,
         message="Read successful",
         data=result["data"],
         rows_affected=len(result["data"]) if result["data"] else 0,
-        executed_on=master_host
+        executed_on=read_host
     )
 
 

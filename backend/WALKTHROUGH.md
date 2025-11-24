@@ -99,8 +99,16 @@ Response:
 
 **Flow**:
 1. Parse SELECT query
-2. Route to master for strong consistency
-3. Return results
+2. Fetch metrics from metrics collector
+3. Select best replica (lowest latency, low replication lag, healthy)
+4. Route to selected replica (or master if no suitable replica)
+5. Return results
+
+**Selection Criteria**:
+- Replica must be healthy
+- Replication lag < 5 timestamps
+- Sort by latency (lowest first)
+- Fallback to master if no suitable replica
 
 **Test Results**:
 ```bash
@@ -112,7 +120,7 @@ Response:
 {
   "success": true,
   "message": "Read successful",
-  "rows_affected": 1,
+  "rows_affected": 2,
   "data": [
     {
       "id": 1,
@@ -120,15 +128,24 @@ Response:
       "email": "alice@example.com",
       "created_at": "2025-11-24T00:49:34",
       "timestamp": null
+    },
+    {
+      "id": 2,
+      "name": "Bob",
+      "email": "bob@example.com",
+      "created_at": "2025-11-24T00:49:46",
+      "timestamp": null
     }
   ],
-  "executed_on": "mysql-master"
+  "executed_on": "mysql-replica-3"
 }
 ```
 
 **Verification**:
 - ✅ Data retrieved successfully
-- ✅ Strong consistency (read from master)
+- ✅ Routed to best replica (replica-3 with lowest latency: 6.38ms)
+- ✅ Reduces load on master
+- ✅ Better read performance
 
 ### 4. Metrics Collection
 
