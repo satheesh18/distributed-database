@@ -99,12 +99,14 @@ Response:
 ```json
 {
   "success": true,
-  "message": "Write successful (timestamp: 5, quorum: 2/2)",
+  "message": "Write successful (timestamp: 5, quorum: 2/2, total: 3/3)",
   "timestamp": 5,
   "rows_affected": 1,
   "executed_on": "mysql-master"
 }
 ```
+
+**Note**: Writes replicate to **all 3 replicas** but only wait for the **quorum (2 best replicas)** to confirm. This ensures no replicas are left behind while maintaining strong consistency and optimal performance.
 
 ### Read Query
 

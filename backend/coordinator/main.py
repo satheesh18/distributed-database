@@ -281,37 +281,55 @@ async def handle_write_query(query: str) -> QueryResponse:
         if not result["success"]:
             raise HTTPException(status_code=500, detail=f"Query failed on new master: {result.get('error')}")
     
-    # Step 3: Get quorum
+    # Step 3: Get quorum (determines which replicas we wait for)
     quorum = await get_quorum()
     
-    # Step 4: Replicate to quorum
+    # Step 4: Replicate to ALL replicas (not just quorum)
+    # IMPORTANT: Exclude the current master from replication (it already has the write)
+    # This handles the case where a replica has been promoted to master
+    with state_lock:
+        current_master_host = current_master
+    
+    # Filter out the current master from the replica list
+    actual_replicas = [
+        r for r in MYSQL_REPLICAS 
+        if r["host"] != current_master_host
+    ]
+    
+    # We send to all replicas to keep them in sync, but only wait for quorum confirmation
     successful_replications = 0
     failed_replicas = []
+    quorum_confirmations = 0
     
-    for replica_id in quorum:
-        replica_host = next((r["host"] for r in MYSQL_REPLICAS if r["id"] == replica_id), None)
-        if not replica_host:
-            continue
+    for replica in actual_replicas:
+        replica_id = replica["id"]
+        replica_host = replica["host"]
         
         replica_result = execute_query_on_host(replica_host, query, timestamp)
         
         if replica_result["success"]:
             successful_replications += 1
+            # Check if this replica is in the quorum
+            if replica_id in quorum:
+                quorum_confirmations += 1
         else:
             failed_replicas.append(replica_id)
             print(f"Replication to {replica_id} failed: {replica_result.get('error')}")
     
     # Step 5: Check if quorum was achieved
+    # We need majority of quorum members to confirm (not just any replicas)
     quorum_size = len(quorum)
-    if successful_replications < (quorum_size // 2 + 1):
+    required_confirmations = (quorum_size // 2 + 1)
+    
+    if quorum_confirmations < required_confirmations:
         raise HTTPException(
             status_code=500,
-            detail=f"Quorum not achieved: {successful_replications}/{quorum_size} replicas confirmed"
+            detail=f"Quorum not achieved: {quorum_confirmations}/{quorum_size} quorum replicas confirmed (total: {successful_replications}/{len(actual_replicas)})"
         )
     
     return QueryResponse(
         success=True,
-        message=f"Write successful (timestamp: {timestamp}, quorum: {successful_replications}/{quorum_size})",
+        message=f"Write successful (timestamp: {timestamp}, quorum: {quorum_confirmations}/{quorum_size}, total: {successful_replications}/{len(actual_replicas)})",
         timestamp=timestamp,
         rows_affected=result["rows_affected"],
         executed_on=master_host

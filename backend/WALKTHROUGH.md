@@ -56,8 +56,14 @@ curl http://localhost:8002/timestamp
 1. Coordinator requests timestamp from timestamp service
 2. Executes write on master with timestamp
 3. Cabinet service selects optimal quorum (2 out of 3 replicas)
-4. Replicates to quorum members
-5. Returns success when majority confirms
+4. **Replicates to ALL replicas** (keeps all in sync)
+5. Waits for quorum members to confirm
+6. Returns success when quorum confirms
+
+**Key Point**: We replicate to **all 3 replicas** to keep them in sync, but only wait for the **quorum (2 best replicas)** to confirm before returning success. This ensures:
+- No replicas are left behind
+- Strong consistency via quorum
+- Optimal performance by waiting for fastest replicas
 
 **Test Results**:
 ```bash
@@ -69,7 +75,7 @@ curl -X POST http://localhost:8000/query \
 Response:
 {
   "success": true,
-  "message": "Write successful (timestamp: 1, quorum: 2/2)",
+  "message": "Write successful (timestamp: 1, quorum: 2/2, total: 3/3)",
   "timestamp": 1,
   "rows_affected": 1,
   "executed_on": "mysql-master"
@@ -83,7 +89,7 @@ curl -X POST http://localhost:8000/query \
 Response:
 {
   "success": true,
-  "message": "Write successful (timestamp: 2, quorum: 2/2)",
+  "message": "Write successful (timestamp: 2, quorum: 2/2, total: 3/3)",
   "timestamp": 2,
   "rows_affected": 1,
   "executed_on": "mysql-master"
@@ -92,8 +98,9 @@ Response:
 
 **Verification**:
 - ✅ Timestamps are sequential and globally ordered
-- ✅ Quorum achieved (2/2 replicas confirmed)
-- ✅ Data written to master and replicated
+- ✅ Quorum achieved (2/2 quorum replicas confirmed)
+- ✅ All replicas updated (3/3 total replicas)
+- ✅ Data written to master and replicated to all replicas
 
 ### 3. Read Operations
 
