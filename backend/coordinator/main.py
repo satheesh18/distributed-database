@@ -22,11 +22,21 @@ import mysql.connector
 import httpx
 from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from query_parser import parse_query, is_write_query, is_read_query
 
 app = FastAPI()
+
+# Add CORS middleware to allow frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins for development
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Configuration
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "rootpass")

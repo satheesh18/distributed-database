@@ -18,9 +18,19 @@ from typing import Dict, List
 from datetime import datetime
 import mysql.connector
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Configuration
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "rootpass")
