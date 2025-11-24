@@ -1,0 +1,13 @@
+[mysqld]
+# Server identification
+server-id = 1
+
+# Binary logging (for internal tracking)
+log-bin = mysql-bin
+binlog_format = ROW
+
+# Performance schema
+performance_schema = ON
+
+# General settings
+max_connections = 200
