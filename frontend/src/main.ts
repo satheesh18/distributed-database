@@ -22,6 +22,7 @@ import Timeline from 'primevue/timeline'
 import Divider from 'primevue/divider'
 import Chip from 'primevue/chip'
 import Badge from 'primevue/badge'
+import Dropdown from 'primevue/dropdown'
 
 const app = createApp(App)
 
@@ -51,5 +52,6 @@ app.component('Timeline', Timeline)
 app.component('Divider', Divider)
 app.component('Chip', Chip)
 app.component('Badge', Badge)
+app.component('Dropdown', Dropdown)
 
 app.mount('#app')

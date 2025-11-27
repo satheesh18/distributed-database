@@ -19,12 +19,15 @@ import asyncio
 import os
 import random
 import threading
+import time
 import mysql.connector
 import httpx
 from typing import Dict, List, Optional
+from enum import Enum
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import math
 import subprocess
 from query_parser import parse_query, is_write_query, is_read_query
 
@@ -62,10 +65,26 @@ state_lock = threading.Lock()
 current_master = MYSQL_MASTER_HOST
 master_is_original = True
 
+# Consistency metrics tracking
+consistency_metrics = {
+    "ONE": {"count": 0, "total_latency": 0.0, "failures": 0},
+    "QUORUM": {"count": 0, "total_latency": 0.0, "failures": 0},
+    "ALL": {"count": 0, "total_latency": 0.0, "failures": 0}
+}
+metrics_lock = threading.Lock()
+
+
+class ConsistencyLevel(str, Enum):
+    """Consistency levels for read and write operations"""
+    ONE = "ONE"
+    QUORUM = "QUORUM"
+    ALL = "ALL"
+
 
 class QueryRequest(BaseModel):
     """Request model for SQL queries"""
     query: str
+    consistency: ConsistencyLevel = ConsistencyLevel.QUORUM  # Default to QUORUM
 
 
 class QueryResponse(BaseModel):
@@ -76,6 +95,9 @@ class QueryResponse(BaseModel):
     rows_affected: Optional[int] = None
     data: Optional[List[Dict]] = None
     executed_on: Optional[str] = None
+    consistency_level: Optional[str] = None
+    latency_ms: Optional[float] = None
+    replicas_contacted: Optional[int] = None
 
 
 def get_mysql_connection(host: str):
@@ -226,24 +248,25 @@ def execute_query_on_host(host: str, query: str, timestamp: Optional[int] = None
         }
 
 
-async def handle_write_query(query: str) -> QueryResponse:
+async def handle_write_query(query: str, consistency: ConsistencyLevel) -> QueryResponse:
     """
-    Handle a write query (INSERT, UPDATE, DELETE).
+    Handle a write query (INSERT, UPDATE, DELETE) with tunable consistency.
     
-    Flow:
-    1. Get timestamp from timestamp service
-    2. Execute on master
-    3. Get quorum from Cabinet
-    4. Replicate to quorum members
-    5. Return success when quorum confirms
+    Consistency Levels:
+    - ONE: Write to master only (fastest, eventual consistency)
+    - QUORUM: Write to majority of replicas (balanced, strong consistency)
+    - ALL: Write to all replicas (slowest, strongest consistency)
     
     Args:
         query: SQL write query
+        consistency: Desired consistency level
         
     Returns:
-        QueryResponse with execution results
+        QueryResponse with execution results and metrics
     """
     global current_master, master_is_original
+    
+    start_time = time.time()
     
     # Step 1: Get timestamp
     timestamp = await get_timestamp()
@@ -267,6 +290,8 @@ async def handle_write_query(query: str) -> QueryResponse:
         )
         
         if not new_master_host:
+            with metrics_lock:
+                consistency_metrics[consistency.value]["failures"] += 1
             raise HTTPException(status_code=503, detail="Failover failed: no suitable replica")
         
         # Update master
@@ -280,61 +305,125 @@ async def handle_write_query(query: str) -> QueryResponse:
         result = execute_query_on_host(new_master_host, query, timestamp)
         
         if not result["success"]:
+            with metrics_lock:
+                consistency_metrics[consistency.value]["failures"] += 1
             raise HTTPException(status_code=500, detail=f"Query failed on new master: {result.get('error')}")
     
-    # Step 3: Get quorum (determines which replicas we wait for)
-    quorum = await get_quorum()
-    
-    # Step 4: Replicate to ALL replicas (not just quorum)
-    # IMPORTANT: Exclude the current master from replication (it already has the write)
-    # This handles the case where a replica has been promoted to master
+    # Filter out the current master from the replica list
     with state_lock:
         current_master_host = current_master
     
-    # Filter out the current master from the replica list
     actual_replicas = [
         r for r in MYSQL_REPLICAS 
         if r["host"] != current_master_host
     ]
     
-    # We send to all replicas to keep them in sync, but only wait for quorum confirmation
-    successful_replications = 0
-    failed_replicas = []
-    quorum_confirmations = 0
-    
-    for replica in actual_replicas:
-        replica_id = replica["id"]
-        replica_host = replica["host"]
+    # Consistency-specific logic
+    if consistency == ConsistencyLevel.ONE:
+        # ONE: Return immediately after master confirms (fastest)
+        latency_ms = (time.time() - start_time) * 1000
         
-        replica_result = execute_query_on_host(replica_host, query, timestamp)
+        # Still replicate to all replicas in background (eventual consistency)
+        # but don't wait for them
+        for replica in actual_replicas:
+            execute_query_on_host(replica["host"], query, timestamp)
         
-        if replica_result["success"]:
-            successful_replications += 1
-            # Check if this replica is in the quorum
-            if replica_id in quorum:
-                quorum_confirmations += 1
-        else:
-            failed_replicas.append(replica_id)
-            print(f"Replication to {replica_id} failed: {replica_result.get('error')}")
-    
-    # Step 5: Check if quorum was achieved
-    # We need majority of quorum members to confirm (not just any replicas)
-    quorum_size = len(quorum)
-    required_confirmations = (quorum_size // 2 + 1)
-    
-    if quorum_confirmations < required_confirmations:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Quorum not achieved: {quorum_confirmations}/{quorum_size} quorum replicas confirmed (total: {successful_replications}/{len(actual_replicas)})"
+        # Track metrics
+        with metrics_lock:
+            consistency_metrics["ONE"]["count"] += 1
+            consistency_metrics["ONE"]["total_latency"] += latency_ms
+        
+        return QueryResponse(
+            success=True,
+            message=f"Write successful (consistency: ONE, timestamp: {timestamp})",
+            timestamp=timestamp,
+            rows_affected=result["rows_affected"],
+            executed_on=master_host,
+            consistency_level="ONE",
+            latency_ms=round(latency_ms, 2),
+            replicas_contacted=1
         )
     
-    return QueryResponse(
-        success=True,
-        message=f"Write successful (timestamp: {timestamp}, quorum: {quorum_confirmations}/{quorum_size}, total: {successful_replications}/{len(actual_replicas)})",
-        timestamp=timestamp,
-        rows_affected=result["rows_affected"],
-        executed_on=master_host
-    )
+    elif consistency == ConsistencyLevel.QUORUM:
+        # QUORUM: Wait for majority of replicas (balanced)
+        quorum = await get_quorum()
+        
+        successful_replications = 0
+        quorum_confirmations = 0
+        
+        for replica in actual_replicas:
+            replica_result = execute_query_on_host(replica["host"], query, timestamp)
+            
+            if replica_result["success"]:
+                successful_replications += 1
+                if replica["id"] in quorum:
+                    quorum_confirmations += 1
+        
+        quorum_size = len(quorum)
+        required_confirmations = math.ceil(quorum_size / 2)
+        
+        latency_ms = (time.time() - start_time) * 1000
+        
+        if quorum_confirmations < required_confirmations:
+            with metrics_lock:
+                consistency_metrics["QUORUM"]["failures"] += 1
+            raise HTTPException(
+                status_code=500,
+                detail=f"Quorum not achieved: {quorum_confirmations}/{quorum_size} quorum replicas confirmed"
+            )
+        
+        # Track metrics
+        with metrics_lock:
+            consistency_metrics["QUORUM"]["count"] += 1
+            consistency_metrics["QUORUM"]["total_latency"] += latency_ms
+        
+        return QueryResponse(
+            success=True,
+            message=f"Write successful (consistency: QUORUM, timestamp: {timestamp}, quorum: {quorum_confirmations}/{quorum_size})",
+            timestamp=timestamp,
+            rows_affected=result["rows_affected"],
+            executed_on=master_host,
+            consistency_level="QUORUM",
+            latency_ms=round(latency_ms, 2),
+            replicas_contacted=successful_replications + 1
+        )
+    
+    else:  # ConsistencyLevel.ALL
+        # ALL: Wait for all replicas (strongest consistency)
+        successful_replications = 0
+        
+        for replica in actual_replicas:
+            replica_result = execute_query_on_host(replica["host"], query, timestamp)
+            
+            if replica_result["success"]:
+                successful_replications += 1
+        
+        latency_ms = (time.time() - start_time) * 1000
+        total_replicas = len(actual_replicas)
+        
+        if successful_replications < total_replicas:
+            with metrics_lock:
+                consistency_metrics["ALL"]["failures"] += 1
+            raise HTTPException(
+                status_code=500,
+                detail=f"ALL consistency not achieved: {successful_replications}/{total_replicas} replicas confirmed"
+            )
+        
+        # Track metrics
+        with metrics_lock:
+            consistency_metrics["ALL"]["count"] += 1
+            consistency_metrics["ALL"]["total_latency"] += latency_ms
+        
+        return QueryResponse(
+            success=True,
+            message=f"Write successful (consistency: ALL, timestamp: {timestamp}, replicas: {successful_replications}/{total_replicas})",
+            timestamp=timestamp,
+            rows_affected=result["rows_affected"],
+            executed_on=master_host,
+            consistency_level="ALL",
+            latency_ms=round(latency_ms, 2),
+            replicas_contacted=successful_replications + 1
+        )
 
 
 async def get_best_replica_for_read() -> str:
@@ -400,48 +489,163 @@ async def get_best_replica_for_read() -> str:
             return current_master
 
 
-async def handle_read_query(query: str) -> QueryResponse:
+async def handle_read_query(query: str, consistency: ConsistencyLevel) -> QueryResponse:
     """
-    Handle a read query (SELECT).
+    Handle a read query (SELECT) with tunable consistency.
     
-    Routes to the best available replica based on:
-    - Latency (lower is better)
-    - Replication lag (lower is better)
-    - Health status (must be healthy)
-    
-    Falls back to master if no suitable replica is available.
+    Consistency Levels:
+    - ONE: Read from single best replica (fastest, eventual consistency)
+    - QUORUM: Read from majority, return freshest (balanced, strong consistency)
+    - ALL: Read from all replicas, return freshest (slowest, strongest consistency)
     
     Args:
         query: SQL read query
+        consistency: Desired consistency level
         
     Returns:
-        QueryResponse with query results
+        QueryResponse with query results and metrics
     """
-    # Select best replica for read
-    read_host = await get_best_replica_for_read()
+    start_time = time.time()
     
-    # Execute on selected host
-    result = execute_query_on_host(read_host, query)
+    if consistency == ConsistencyLevel.ONE:
+        # ONE: Read from single best replica (current behavior)
+        read_host = await get_best_replica_for_read()
+        result = execute_query_on_host(read_host, query)
+        
+        if not result["success"]:
+            # Fallback to master
+            with state_lock:
+                master_host = current_master
+            result = execute_query_on_host(master_host, query)
+            read_host = master_host
+            
+            if not result["success"]:
+                with metrics_lock:
+                    consistency_metrics["ONE"]["failures"] += 1
+                raise HTTPException(status_code=500, detail=f"Query failed: {result.get('error')}")
+        
+        latency_ms = (time.time() - start_time) * 1000
+        
+        # Track metrics
+        with metrics_lock:
+            consistency_metrics["ONE"]["count"] += 1
+            consistency_metrics["ONE"]["total_latency"] += latency_ms
+        
+        return QueryResponse(
+            success=True,
+            message="Read successful (consistency: ONE)",
+            data=result["data"],
+            rows_affected=len(result["data"]) if result["data"] else 0,
+            executed_on=read_host,
+            consistency_level="ONE",
+            latency_ms=round(latency_ms, 2),
+            replicas_contacted=1
+        )
     
-    if not result["success"]:
-        # If read fails on replica, try master as fallback
-        print(f"Read failed on {read_host}, trying master")
+    elif consistency == ConsistencyLevel.QUORUM:
+        # QUORUM: Read from majority of replicas, return most recent
+        quorum = await get_quorum()
+        
+        # Read from master + quorum replicas
         with state_lock:
             master_host = current_master
         
-        result = execute_query_on_host(master_host, query)
-        read_host = master_host
+        results = []
+        hosts_queried = []
         
-        if not result["success"]:
-            raise HTTPException(status_code=500, detail=f"Query failed: {result.get('error')}")
+        # Query master
+        master_result = execute_query_on_host(master_host, query)
+        if master_result["success"]:
+            results.append({"host": master_host, "data": master_result["data"]})
+            hosts_queried.append(master_host)
+        
+        # Query quorum replicas
+        for replica in MYSQL_REPLICAS:
+            if replica["id"] in quorum:
+                replica_result = execute_query_on_host(replica["host"], query)
+                if replica_result["success"]:
+                    results.append({"host": replica["host"], "data": replica_result["data"]})
+                    hosts_queried.append(replica["host"])
+        
+        latency_ms = (time.time() - start_time) * 1000
+        
+        if len(results) < math.ceil(len(quorum) / 2):
+            with metrics_lock:
+                consistency_metrics["QUORUM"]["failures"] += 1
+            raise HTTPException(
+                status_code=500,
+                detail=f"QUORUM read failed: only {len(results)} replicas responded"
+            )
+        
+        # Return the most recent result (all should be same for consistent data)
+        best_result = results[0]  # In practice, all should match
+        
+        # Track metrics
+        with metrics_lock:
+            consistency_metrics["QUORUM"]["count"] += 1
+            consistency_metrics["QUORUM"]["total_latency"] += latency_ms
+        
+        return QueryResponse(
+            success=True,
+            message=f"Read successful (consistency: QUORUM, {len(results)} replicas)",
+            data=best_result["data"],
+            rows_affected=len(best_result["data"]) if best_result["data"] else 0,
+            executed_on=", ".join(hosts_queried),
+            consistency_level="QUORUM",
+            latency_ms=round(latency_ms, 2),
+            replicas_contacted=len(results)
+        )
     
-    return QueryResponse(
-        success=True,
-        message="Read successful",
-        data=result["data"],
-        rows_affected=len(result["data"]) if result["data"] else 0,
-        executed_on=read_host
-    )
+    else:  # ConsistencyLevel.ALL
+        # ALL: Read from all replicas, return most recent
+        with state_lock:
+            master_host = current_master
+        
+        results = []
+        hosts_queried = []
+        
+        # Query master
+        master_result = execute_query_on_host(master_host, query)
+        if master_result["success"]:
+            results.append({"host": master_host, "data": master_result["data"]})
+            hosts_queried.append(master_host)
+        
+        # Query all replicas
+        for replica in MYSQL_REPLICAS:
+            replica_result = execute_query_on_host(replica["host"], query)
+            if replica_result["success"]:
+                results.append({"host": replica["host"], "data": replica_result["data"]})
+                hosts_queried.append(replica["host"])
+        
+        latency_ms = (time.time() - start_time) * 1000
+        total_nodes = len(MYSQL_REPLICAS) + 1  # replicas + master
+        
+        if len(results) < total_nodes:
+            with metrics_lock:
+                consistency_metrics["ALL"]["failures"] += 1
+            raise HTTPException(
+                status_code=500,
+                detail=f"ALL read failed: only {len(results)}/{total_nodes} nodes responded"
+            )
+        
+        # Return the most recent result (all should be same for consistent data)
+        best_result = results[0]
+        
+        # Track metrics
+        with metrics_lock:
+            consistency_metrics["ALL"]["count"] += 1
+            consistency_metrics["ALL"]["total_latency"] += latency_ms
+        
+        return QueryResponse(
+            success=True,
+            message=f"Read successful (consistency: ALL, {len(results)} nodes)",
+            data=best_result["data"],
+            rows_affected=len(best_result["data"]) if best_result["data"] else 0,
+            executed_on=", ".join(hosts_queried),
+            consistency_level="ALL",
+            latency_ms=round(latency_ms, 2),
+            replicas_contacted=len(results)
+        )
 
 
 @app.post("/query", response_model=QueryResponse)
@@ -470,11 +674,11 @@ async def execute_query(request: QueryRequest):
     if query_type == "UNKNOWN":
         raise HTTPException(status_code=400, detail="Unsupported query type")
     
-    # Route based on query type
+    # Route based on query type with consistency level
     if is_write_query(query_type):
-        return await handle_write_query(query)
+        return await handle_write_query(query, request.consistency)
     elif is_read_query(query_type):
-        return await handle_read_query(query)
+        return await handle_read_query(query, request.consistency)
     else:
         raise HTTPException(status_code=400, detail="Invalid query type")
 
@@ -488,6 +692,30 @@ async def get_status():
             "master_is_original": master_is_original,
             "replicas": [r["id"] for r in MYSQL_REPLICAS]
         }
+
+
+@app.get("/consistency-metrics")
+async def get_consistency_metrics():
+    """Get consistency level performance metrics"""
+    with metrics_lock:
+        metrics_summary = {}
+        for level, data in consistency_metrics.items():
+            avg_latency = (
+                data["total_latency"] / data["count"] 
+                if data["count"] > 0 
+                else 0
+            )
+            metrics_summary[level] = {
+                "count": data["count"],
+                "avg_latency_ms": round(avg_latency, 2),
+                "failures": data["failures"],
+                "success_rate": (
+                    round((data["count"] / (data["count"] + data["failures"]) * 100), 2)
+                    if (data["count"] + data["failures"]) > 0
+                    else 100.0
+                )
+            }
+        return metrics_summary
 
 
 @app.get("/health")

@@ -63,6 +63,43 @@
       </DataTable>
     </Panel>
 
+    <!-- Consistency Metrics -->
+    <Panel header="Consistency Level Metrics" class="mb-4">
+      <DataTable :value="consistencyMetricsArray" :loading="loadingConsistencyMetrics">
+        <Column field="level" header="Level">
+          <template #body="slotProps">
+            <Tag :severity="getConsistencySeverity(slotProps.data.level)">{{ slotProps.data.level }}</Tag>
+          </template>
+        </Column>
+        <Column field="count" header="Requests">
+          <template #body="slotProps">
+            {{ slotProps.data.count }}
+          </template>
+        </Column>
+        <Column field="avg_latency_ms" header="Avg Latency (ms)">
+          <template #body="slotProps">
+            <Tag :severity="getLatencySeverity(slotProps.data.avg_latency_ms)">
+              {{ slotProps.data.avg_latency_ms.toFixed(2) }}
+            </Tag>
+          </template>
+        </Column>
+        <Column field="failures" header="Failures">
+          <template #body="slotProps">
+            <Tag :severity="slotProps.data.failures > 0 ? 'danger' : 'success'">
+              {{ slotProps.data.failures }}
+            </Tag>
+          </template>
+        </Column>
+        <Column field="success_rate" header="Success Rate">
+          <template #body="slotProps">
+            <Tag :severity="slotProps.data.success_rate >= 95 ? 'success' : 'warning'">
+              {{ slotProps.data.success_rate.toFixed(1) }}%
+            </Tag>
+          </template>
+        </Column>
+      </DataTable>
+    </Panel>
+
     <!-- Query Execution -->
     <Panel header="Query Execution" class="mb-4">
       <div class="query-section">
@@ -74,6 +111,31 @@
             class="w-full"
             placeholder="Enter SQL query (e.g., SELECT * FROM users)"
           />
+        </div>
+        
+        <div class="mb-3">
+          <label class="block mb-2 font-semibold">Consistency Levels</label>
+          <Dropdown 
+            v-model="consistencyLevel" 
+            :options="consistencyOptions" 
+            optionLabel="label" 
+            optionValue="value"
+            placeholder="Select Consistency Level"
+            class="w-full"
+          >
+            <template #value="slotProps">
+              <div v-if="slotProps.value">
+                <Tag :severity="getConsistencySeverity(slotProps.value)" class="mr-2">{{ slotProps.value }}</Tag>
+                <span class="text-sm">{{ getConsistencyDescription(slotProps.value) }}</span>
+              </div>
+            </template>
+            <template #option="slotProps">
+              <div>
+                <Tag :severity="getConsistencySeverity(slotProps.option.value)" class="mr-2">{{ slotProps.option.value }}</Tag>
+                <span class="text-sm">{{ slotProps.option.description }}</span>
+              </div>
+            </template>
+          </Dropdown>
         </div>
         
         <div class="action-buttons mb-3">
@@ -199,6 +261,16 @@ const executionFlow = ref<any[]>([])
 const queryResult = ref<any>(null)
 const systemStatus = ref<any>({})
 const masterRunning = ref(true)
+const consistencyLevel = ref('QUORUM')
+const consistencyMetrics = ref<any>({})
+const consistencyMetricsArray = ref<any[]>([])
+const loadingConsistencyMetrics = ref(false)
+
+const consistencyOptions = [
+  { label: 'ONE', value: 'ONE', description: 'Fastest - Eventual Consistency' },
+  { label: 'QUORUM', value: 'QUORUM', description: 'Balanced - Strong Consistency' },
+  { label: 'ALL', value: 'ALL', description: 'Strongest - All Nodes' }
+]
 
 let refreshInterval: any = null
 
@@ -251,6 +323,49 @@ const fetchSystemStatus = async () => {
   }
 }
 
+const fetchConsistencyMetrics = async () => {
+  loadingConsistencyMetrics.value = true
+  try {
+    const response = await fetch(`${API_BASE}/consistency-metrics`)
+    const data = await response.json()
+    consistencyMetrics.value = data
+    
+    // Convert to array for DataTable
+    consistencyMetricsArray.value = Object.keys(data).map(level => ({
+      level,
+      ...data[level]
+    }))
+  } catch (error) {
+    console.error('Failed to fetch consistency metrics:', error)
+  } finally {
+    loadingConsistencyMetrics.value = false
+  }
+}
+
+const getConsistencySeverity = (level: string) => {
+  switch (level) {
+    case 'ONE': return 'success'
+    case 'QUORUM': return 'info'
+    case 'ALL': return 'warning'
+    default: return 'secondary'
+  }
+}
+
+const getConsistencyDescription = (level: string) => {
+  switch (level) {
+    case 'ONE': return 'Fastest - Eventual Consistency'
+    case 'QUORUM': return 'Balanced - Strong Consistency'
+    case 'ALL': return 'Strongest - All Nodes'
+    default: return ''
+  }
+}
+
+const getLatencySeverity = (latency: number) => {
+  if (latency < 20) return 'success'
+  if (latency < 50) return 'info'
+  return 'warning'
+}
+
 const executeQuery = async () => {
   executing.value = true
   executionFlow.value = []
@@ -266,7 +381,10 @@ const executeQuery = async () => {
     const response = await fetch(`${API_BASE}/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: query.value })
+      body: JSON.stringify({ 
+        query: query.value,
+        consistency: consistencyLevel.value 
+      })
     })
 
     const result = await response.json()
@@ -296,6 +414,7 @@ const executeQuery = async () => {
     queryResult.value = result
     await fetchMetrics()
     await fetchSystemStatus()
+    await fetchConsistencyMetrics()
   } catch (error: any) {
     queryResult.value = {
       success: false,
@@ -616,12 +735,14 @@ onMounted(() => {
   checkServiceHealth()
   fetchMetrics()
   fetchSystemStatus()
+  fetchConsistencyMetrics()
   
   // Refresh every 5 seconds
   refreshInterval = setInterval(() => {
     checkServiceHealth()
     fetchMetrics()
     fetchSystemStatus()
+    fetchConsistencyMetrics()
   }, 5000)
 })
 
