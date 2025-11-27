@@ -132,12 +132,29 @@ async def fetch_metrics():
     """
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"{METRICS_COLLECTOR_URL}/metrics", timeout=5.0)
+            response = await client.get(f"{METRICS_COLLECTOR_URL}/metrics", timeout=10.0)
             response.raise_for_status()
             return response.json()
+    except httpx.ConnectError as e:
+        raise HTTPException(
+            status_code=503, 
+            detail=f"Cannot connect to metrics collector at {METRICS_COLLECTOR_URL}. Is the service running? Error: {str(e)}"
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=503, 
+            detail=f"Timeout connecting to metrics collector at {METRICS_COLLECTOR_URL}"
+        )
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=503, 
+            detail=f"Metrics collector returned error {e.response.status_code}: {e.response.text}"
+        )
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Failed to fetch metrics: {str(e)}")
-
+        raise HTTPException(
+            status_code=503, 
+            detail=f"Failed to fetch metrics from {METRICS_COLLECTOR_URL}: {str(e)}"
+        )
 
 @app.post("/elect-leader", response_model=LeaderElectionResponse)
 async def elect_leader(request: LeaderElectionRequest):

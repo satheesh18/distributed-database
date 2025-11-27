@@ -159,6 +159,8 @@ services:
   coordinator:
     build: ./coordinator
     container_name: coordinator
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # Mount Docker socket for container control
     environment:
       - MYSQL_MASTER_HOST=mysql-master
       - MYSQL_REPLICA_1_HOST=mysql-replica-1

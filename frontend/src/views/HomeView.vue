@@ -348,66 +348,267 @@ const getQuorum = async () => {
 
 const electLeader = async () => {
   executionFlow.value = []
+  executing.value = true
+  queryResult.value = null
+  
   try {
-    const response = await fetch('http://localhost:8005/elect-leader', {
+    // First call SEER to elect leader
+    executionFlow.value.push({
+      title: 'Calling SEER Algorithm',
+      detail: 'Analyzing replicas to select optimal leader...'
+    })
+    
+    const seerResponse = await fetch('http://localhost:8005/elect-leader', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({})
     })
-    const data = await response.json()
+    const seerData = await seerResponse.json()
     
     executionFlow.value.push({
       title: 'SEER Algorithm Executed',
-      detail: `Elected leader: ${data.leader_id}`
-    })
-    
-    executionFlow.value.push({
-      title: 'Leader Score',
-      detail: `Score: ${data.score.toFixed(3)} (latency: ${data.latency_ms.toFixed(2)}ms, lag: ${data.replication_lag})`
+      detail: `Elected leader: ${seerData.leader_id}`
     })
 
-    queryResult.value = {
-      success: true,
-      message: `Leader elected: ${data.leader_id} with score ${data.score.toFixed(3)}`
+    executionFlow.value.push({
+      title: 'Leader Score',
+      detail: `Score: ${seerData.score.toFixed(3)} (latency: ${seerData.latency_ms.toFixed(2)}ms, lag: ${seerData.replication_lag})`
+    })
+
+    // Now trigger failover through coordinator to actually update the system
+    executionFlow.value.push({
+      title: 'Updating System Configuration',
+      detail: `Promoting ${seerData.leader_id} to master...`
+    })
+    
+    const failoverResponse = await fetch(`${API_BASE}/admin/trigger-failover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_leader: seerData.leader_id })
+    })
+    
+    const failoverData = await failoverResponse.json()
+    
+    if (failoverData.success) {
+      executionFlow.value.push({
+        title: 'System Updated',
+        detail: `Master changed from ${failoverData.old_master} to ${failoverData.new_master}`
+      })
+      
+      queryResult.value = {
+        success: true,
+        message: `Leader elected and system updated: ${seerData.leader_id} is now the master with score ${seerData.score.toFixed(3)}`
+      }
+    } else {
+      queryResult.value = {
+        success: true,
+        message: `Leader elected: ${seerData.leader_id} with score ${seerData.score.toFixed(3)} (Note: System failover may require manual trigger)`
+      }
     }
+    
+    // Refresh system status and metrics after electing leader
+    setTimeout(async () => {
+      await fetchSystemStatus()
+      await fetchMetrics()
+    }, 1500)
   } catch (error: any) {
     queryResult.value = {
       success: false,
       message: `Error: ${error.message}`
     }
+  } finally {
+    executing.value = false
   }
 }
-
 const stopMaster = async () => {
+  executing.value = true
   executionFlow.value = []
-  executionFlow.value.push({
-    title: 'Stopping Master',
-    detail: 'Executing: docker-compose stop mysql-master'
-  })
+  queryResult.value = null
   
-  queryResult.value = {
-    success: true,
-    message: 'Master stopped. Try executing a write query to trigger failover!'
+  try {
+    executionFlow.value.push({
+      title: 'Stopping Master Container',
+      detail: 'Executing: docker stop mysql-master'
+    })
+    
+    const response = await fetch(`${API_BASE}/admin/stop-master`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    
+    const result = await response.json()
+    
+    if (result.success) {
+      executionFlow.value.push({
+        title: 'Master Stopped',
+        detail: 'Master container is now down'
+      })
+      
+      if (result.new_leader_id) {
+        executionFlow.value.push({
+          title: 'Leader Elected',
+          detail: `New leader: ${result.new_leader_id} (${result.new_master})`
+        })
+        
+        if (result.election_details) {
+          executionFlow.value.push({
+            title: 'Election Details',
+            detail: `Score: ${result.election_details.score?.toFixed(3)}, Latency: ${result.election_details.latency_ms?.toFixed(2)}ms, Lag: ${result.election_details.replication_lag}`
+          })
+        }
+      }
+      
+      queryResult.value = {
+        success: true,
+        message: result.message || 'Master stopped and failover complete!'
+      }
+      
+      masterRunning.value = false
+      
+      // Refresh status after a delay
+      setTimeout(async () => {
+        await fetchSystemStatus()
+        await fetchMetrics()
+      }, 2000)
+    } else {
+      executionFlow.value.push({
+        title: 'Failover Failed',
+        detail: result.error || result.message || 'Unknown error'
+      })
+      
+      if (result.hint) {
+        executionFlow.value.push({
+          title: 'Hint',
+          detail: result.hint
+        })
+      }
+      
+      queryResult.value = {
+        success: false,
+        message: `${result.message || 'Failed to stop master'}\n${result.hint || ''}`
+      }
+    }
+  } catch (error: any) {
+    executionFlow.value.push({
+      title: 'Request Failed',
+      detail: error.message
+    })
+    
+    queryResult.value = {
+      success: false,
+      message: `Error: ${error.message}`
+    }
+  } finally {
+    executing.value = false
   }
-  
-  masterRunning.value = false
-  setTimeout(fetchSystemStatus, 2000)
 }
 
 const startMaster = async () => {
+  executing.value = true
   executionFlow.value = []
-  executionFlow.value.push({
-    title: 'Starting Master',
-    detail: 'Executing: docker-compose start mysql-master'
-  })
+  queryResult.value = null
   
-  queryResult.value = {
-    success: true,
-    message: 'Master started. System will revert to original master.'
+  try {
+    executionFlow.value.push({
+      title: 'Starting Master Container',
+      detail: 'Executing: docker-compose start mysql-master'
+    })
+    
+    const response = await fetch(`${API_BASE}/admin/start-master`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    
+    const result = await response.json()
+    
+    if (result.success) {
+      executionFlow.value.push({
+        title: 'Master Started',
+        detail: 'Master container is running. System restored to original configuration.'
+      })
+      
+      queryResult.value = {
+        success: true,
+        message: 'Master started successfully. System back to normal.'
+      }
+      
+      masterRunning.value = true
+      
+      // Refresh status after a delay
+      setTimeout(async () => {
+        await fetchSystemStatus()
+        await fetchMetrics()
+      }, 3000)
+    } else {
+      queryResult.value = {
+        success: false,
+        message: `Failed to start master: ${result.error || result.message}`
+      }
+    }
+  } catch (error) {
+    queryResult.value = {
+      success: false,
+      message: `Error: ${error.message}`
+    }
+  } finally {
+    executing.value = false
   }
+}
+
+
+const triggerFailover = async () => {
+  executing.value = true
+  executionFlow.value = []
+  queryResult.value = null
   
-  masterRunning.value = true
-  setTimeout(fetchSystemStatus, 2000)
+  try {
+    executionFlow.value.push({
+      title: 'Triggering Manual Failover',
+      detail: 'Electing new leader using SEER algorithm...'
+    })
+    
+    const response = await fetch(`${API_BASE}/admin/trigger-failover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    
+    const result = await response.json()
+    
+    if (result.success) {
+      executionFlow.value.push({
+        title: 'Failover Complete',
+        detail: `New master: ${result.new_leader_id}`
+      })
+      
+      executionFlow.value.push({
+        title: 'Leader Changed',
+        detail: `${result.old_master} → ${result.new_master}`
+      })
+      
+      queryResult.value = {
+        success: true,
+        message: result.message
+      }
+      
+      // Refresh status
+      setTimeout(async () => {
+        await fetchSystemStatus()
+        await fetchMetrics()
+      }, 1000)
+    } else {
+      queryResult.value = {
+        success: false,
+        message: result.message
+      }
+    }
+  } catch (error) {
+    queryResult.value = {
+      success: false,
+      message: `Error: ${error.message}`
+    }
+  } finally {
+    executing.value = false
+  }
 }
 
 // Lifecycle

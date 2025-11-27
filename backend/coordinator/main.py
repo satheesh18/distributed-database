@@ -15,6 +15,7 @@ Flow:
 5. On master failure: Elect new leader via SEER
 """
 
+import asyncio
 import os
 import random
 import threading
@@ -24,7 +25,7 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
+import subprocess
 from query_parser import parse_query, is_write_query, is_read_query
 
 app = FastAPI()
@@ -494,6 +495,243 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "coordinator"}
 
+@app.post("/admin/stop-master")
+async def stop_master():
+    """
+    Stop the MySQL master container to simulate failure.
+    This will IMMEDIATELY trigger leader election via SEER.
+    """
+    global current_master, master_is_original
+    
+    try:
+        # Step 1: Stop the master container
+        print("Stopping mysql-master container...")
+        result = subprocess.run(
+            ["docker", "stop", "mysql-master"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            print(f"Failed to stop master: {result.stderr}")
+            return {
+                "success": False,
+                "message": "Failed to stop master",
+                "error": result.stderr
+            }
+        
+        print("Master stopped successfully")
+        
+        # Step 2: Wait a moment for the container to fully stop
+        await asyncio.sleep(2)
+        
+        # Step 4: Immediately elect new leader using SEER (with retries)
+        print("Triggering leader election via SEER...")
+        
+        max_election_retries = 5
+        election_data = None
+        last_error = None
+        
+        for attempt in range(max_election_retries):
+            try:
+                async with httpx.AsyncClient() as client:
+                    # Call SEER with empty exclude list (SEER will filter unhealthy replicas)
+                    election_response = await client.post(
+                        f"{SEER_SERVICE_URL}/elect-leader",
+                        json={"exclude_replicas": []},  # Empty - SEER filters by health
+                        timeout=20.0  # Increased timeout
+                    )
+                    election_response.raise_for_status()
+                    election_data = election_response.json()
+                    print(f"Election successful on attempt {attempt + 1}")
+                    break
+            except httpx.HTTPStatusError as e:
+                error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
+                print(f"Election attempt {attempt + 1} failed (HTTP {e.response.status_code}): {error_detail}")
+                last_error = error_detail
+                if attempt < max_election_retries - 1:
+                    await asyncio.sleep(3)  # Longer wait between retries
+            except Exception as e:
+                print(f"Election attempt {attempt + 1} failed: {str(e)}")
+                last_error = str(e)
+                if attempt < max_election_retries - 1:
+                    await asyncio.sleep(3)
+        
+        if not election_data:
+            return {
+                "success": False,
+                "message": "Master stopped but leader election failed after retries",
+                "error": last_error or "Unknown error during election",
+                "hint": "Check if metrics-collector and SEER services are running. Master is stopped but system needs manual intervention."
+            }
+        
+        new_leader_id = election_data.get("leader_id")
+        print(f"SEER elected: {new_leader_id}")
+        
+        if not new_leader_id:
+            print("No leader ID in response")
+            return {
+                "success": False,
+                "message": "Master stopped but SEER did not return a leader",
+                "error": "Empty leader_id in response"
+            }
+        
+        # Step 5: Map leader ID to host
+        new_master_host = next(
+            (r["host"] for r in MYSQL_REPLICAS if r["id"] == new_leader_id),
+            None
+        )
+        
+        if not new_master_host:
+            print(f"Could not find host for {new_leader_id}")
+            return {
+                "success": False,
+                "message": "Master stopped but no suitable replica found for failover",
+                "error": f"No host mapping for {new_leader_id}"
+            }
+        
+        # Step 6: Update global master state
+        old_master = current_master
+        with state_lock:
+            current_master = new_master_host
+            master_is_original = False
+        
+        print(f"Failover complete: {old_master} -> {new_master_host} ({new_leader_id})")
+        
+        return {
+            "success": True,
+            "message": "Master stopped and failover complete",
+            "old_master": old_master,
+            "new_master": new_master_host,
+            "new_leader_id": new_leader_id,
+            "election_details": {
+                "leader_id": election_data.get("leader_id"),
+                "score": election_data.get("score"),
+                "latency_ms": election_data.get("latency_ms"),
+                "uptime_seconds": election_data.get("uptime_seconds"),
+                "replication_lag": election_data.get("replication_lag"),
+                "crash_count": election_data.get("crash_count")
+            }
+        }
+    
+    except subprocess.TimeoutExpired:
+        print("Docker command timed out")
+        raise HTTPException(status_code=500, detail="Command timed out")
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error stopping master: {str(e)}")
+
+
+@app.post("/admin/start-master")
+async def start_master():
+    """
+    Start the MySQL master container after failure recovery.
+    """
+    global current_master, master_is_original
+    
+    try:
+        result = subprocess.run(
+            ["docker", "start", "mysql-master"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            # Wait for MySQL to be ready
+            print("Waiting for MySQL master to be ready...")
+            await asyncio.sleep(5)
+            
+            # Reset master to original
+            old_master = current_master
+            with state_lock:
+                current_master = MYSQL_MASTER_HOST
+                master_is_original = True
+            
+            print(f"Master restored: {old_master} -> {MYSQL_MASTER_HOST}")
+            
+            return {
+                "success": True,
+                "message": "Master container started and restored as primary.",
+                "old_master": old_master,
+                "new_master": MYSQL_MASTER_HOST,
+                "output": result.stdout
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Failed to start master",
+                "error": result.stderr
+            }
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Command timed out")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error starting master: {str(e)}")
+
+
+@app.post("/admin/trigger-failover")
+async def trigger_failover():
+    """
+    Manually trigger failover by electing a new leader.
+    Useful for testing SEER algorithm without actually stopping master.
+    """
+    try:
+        # Elect new leader
+        new_leader_id = await elect_new_leader()
+        new_master_host = next(
+            (r["host"] for r in MYSQL_REPLICAS if r["id"] == new_leader_id),
+            None
+        )
+        
+        if not new_master_host:
+            raise HTTPException(status_code=503, detail="No suitable replica found")
+        
+        # Update master
+        global current_master, master_is_original
+        old_master = current_master
+        
+        with state_lock:
+            current_master = new_master_host
+            master_is_original = False
+        
+        return {
+            "success": True,
+            "message": f"Failover complete: {old_master} -> {new_master_host}",
+            "old_master": old_master,
+            "new_master": new_master_host,
+            "new_leader_id": new_leader_id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failover failed: {str(e)}")
+
+
+@app.get("/admin/leader-info")
+async def get_leader_info():
+    """
+    Get detailed information about current leader and election metrics.
+    """
+    try:
+        # Get metrics for all replicas
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{METRICS_COLLECTOR_URL}/metrics", timeout=5.0)
+            response.raise_for_status()
+            metrics_data = response.json()
+        
+        with state_lock:
+            current_leader = current_master
+            is_original = master_is_original
+        
+        return {
+            "current_master": current_leader,
+            "master_is_original": is_original,
+            "replica_metrics": metrics_data.get("replicas", []),
+            "timestamp": metrics_data.get("timestamp")
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get leader info: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
