@@ -14,7 +14,7 @@ The system consists of 10 Docker containers:
 
 | Container | Purpose | Port |
 |-----------|---------|------|
-| mysql-master | Primary database | 3306 |
+| mysql-replica-4 | Primary database | 3306 |
 | mysql-replica-1 | Replica database | 3307 |
 | mysql-replica-2 | Replica database | 3308 |
 | mysql-replica-3 | Replica database | 3309 |
@@ -78,7 +78,7 @@ Response:
   "message": "Write successful (timestamp: 1, quorum: 2/2, total: 3/3)",
   "timestamp": 1,
   "rows_affected": 1,
-  "executed_on": "mysql-master"
+  "executed_on": "mysql-replica-4"
 }
 
 # Second write
@@ -92,7 +92,7 @@ Response:
   "message": "Write successful (timestamp: 2, quorum: 2/2, total: 3/3)",
   "timestamp": 2,
   "rows_affected": 1,
-  "executed_on": "mysql-master"
+  "executed_on": "mysql-replica-4"
 }
 ```
 
@@ -290,7 +290,7 @@ curl http://localhost:8000/status
 
 Response:
 {
-  "current_master": "mysql-master",
+  "current_master": "mysql-replica-4",
   "master_is_original": true,
   "replicas": ["replica-1", "replica-2", "replica-3"]
 }
@@ -310,7 +310,7 @@ NAME                  STATUS
 cabinet-service       Up (healthy)
 coordinator           Up (healthy)
 metrics-collector     Up (healthy)
-mysql-master          Up (healthy)
+mysql-replica-4          Up (healthy)
 mysql-replica-1       Up (healthy)
 mysql-replica-2       Up (healthy)
 mysql-replica-3       Up (healthy)

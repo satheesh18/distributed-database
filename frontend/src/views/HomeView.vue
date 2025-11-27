@@ -245,7 +245,7 @@ const fetchSystemStatus = async () => {
   try {
     const response = await fetch(`${API_BASE}/status`)
     systemStatus.value = await response.json()
-    masterRunning.value = systemStatus.value.current_master === 'mysql-master'
+    masterRunning.value = systemStatus.value.current_master === 'mysql-replica-4'
   } catch (error) {
     console.error('Failed to fetch system status:', error)
   }
@@ -428,7 +428,7 @@ const stopMaster = async () => {
   try {
     executionFlow.value.push({
       title: 'Stopping Master Container',
-      detail: 'Executing: docker stop mysql-master'
+      detail: 'Executing: docker stop mysql-replica-4'
     })
     
     const response = await fetch(`${API_BASE}/admin/stop-master`, {
@@ -511,7 +511,7 @@ const startMaster = async () => {
   try {
     executionFlow.value.push({
       title: 'Starting Master Container',
-      detail: 'Executing: docker-compose start mysql-master'
+      detail: 'Executing: docker-compose start mysql-replica-4'
     })
     
     const response = await fetch(`${API_BASE}/admin/start-master`, {

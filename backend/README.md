@@ -102,7 +102,7 @@ Response:
   "message": "Write successful (timestamp: 5, quorum: 2/2, total: 3/3)",
   "timestamp": 5,
   "rows_affected": 1,
-  "executed_on": "mysql-master"
+  "executed_on": "mysql-replica-4"
 }
 ```
 
@@ -144,7 +144,7 @@ curl http://localhost:8000/status
 Response:
 ```json
 {
-  "current_master": "mysql-master",
+  "current_master": "mysql-replica-4",
   "master_is_original": true,
   "replicas": ["replica-1", "replica-2", "replica-3"]
 }
@@ -215,7 +215,7 @@ curl -X POST http://localhost:8000/query \
 
 ```bash
 # Stop the master
-docker-compose stop mysql-master
+docker-compose stop mysql-replica-4
 
 # Wait a few seconds for detection
 sleep 5
@@ -296,7 +296,7 @@ docker-compose up -d
 
 - Ensure all services are healthy: `docker-compose ps`
 - Check network connectivity: `docker network inspect backend_db-network`
-- Verify MySQL instances are ready: `docker-compose logs mysql-master`
+- Verify MySQL instances are ready: `docker-compose logs mysql-replica-4`
 
 ### Quorum failures
 

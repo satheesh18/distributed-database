@@ -229,7 +229,7 @@ async def scenario_master_failover():
         
         print_warning("\nTo test failover:")
         print("  1. Open another terminal")
-        print("  2. Run: cd backend && docker-compose stop mysql-master")
+        print("  2. Run: cd backend && docker-compose stop mysql-replica-4")
         print("  3. Press Enter here to continue testing...")
         
         input()

@@ -1,10 +1,10 @@
 version: '3.8'
 
 services:
-  # MySQL Master
-  mysql-master:
+  # MySQL Master (renamed to mysql-replica-4)
+  mysql-replica-4:
     image: mysql:8.0
-    container_name: mysql-master
+    container_name: mysql-replica-4
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
@@ -110,7 +110,7 @@ services:
     build: ./metrics-collector
     container_name: metrics-collector
     environment:
-      - MYSQL_MASTER_HOST=mysql-master
+      - MYSQL_MASTER_HOST=mysql-replica-4
       - MYSQL_REPLICA_1_HOST=mysql-replica-1
       - MYSQL_REPLICA_2_HOST=mysql-replica-2
       - MYSQL_REPLICA_3_HOST=mysql-replica-3
@@ -120,7 +120,7 @@ services:
     networks:
       - db-network
     depends_on:
-      mysql-master:
+      mysql-replica-4:
         condition: service_healthy
       mysql-replica-1:
         condition: service_healthy
@@ -162,7 +162,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock  # Mount Docker socket for container control
     environment:
-      - MYSQL_MASTER_HOST=mysql-master
+      - MYSQL_MASTER_HOST=mysql-replica-4
       - MYSQL_REPLICA_1_HOST=mysql-replica-1
       - MYSQL_REPLICA_2_HOST=mysql-replica-2
       - MYSQL_REPLICA_3_HOST=mysql-replica-3
@@ -177,7 +177,7 @@ services:
     networks:
       - db-network
     depends_on:
-      mysql-master:
+      mysql-replica-4:
         condition: service_healthy
       mysql-replica-1:
         condition: service_healthy

@@ -80,7 +80,7 @@ python3 stress_test.py --scenario lag
 **Steps**:
 1. Run the test: `python3 stress_test.py --scenario failover`
 2. When prompted, open another terminal
-3. Stop the master: `docker-compose stop mysql-master`
+3. Stop the master: `docker-compose stop mysql-replica-4`
 4. Press Enter to continue
 5. Watch automatic failover happen!
 
@@ -169,10 +169,10 @@ docker-compose start mysql-replica-2
 
 ```bash
 # Stop master (triggers failover)
-docker-compose stop mysql-master
+docker-compose stop mysql-replica-4
 
 # Restore original master
-docker-compose start mysql-master
+docker-compose start mysql-replica-4
 ```
 
 ## Expected Results
@@ -206,7 +206,7 @@ docker-compose start mysql-master
 curl http://localhost:8000/status
 
 # If master is down, restart it
-docker-compose restart mysql-master
+  docker-compose restart mysql-replica-4
 
 # Or reset the system
 python3 setup.py

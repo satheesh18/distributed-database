@@ -41,7 +41,7 @@ app.add_middleware(
 
 # Configuration
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "rootpass")
-MYSQL_MASTER_HOST = os.getenv("MYSQL_MASTER_HOST", "mysql-master")
+MYSQL_MASTER_HOST = os.getenv("MYSQL_MASTER_HOST", "mysql-replica-4")
 MYSQL_REPLICAS = [
     {"id": "replica-1", "host": os.getenv("MYSQL_REPLICA_1_HOST", "mysql-replica-1")},
     {"id": "replica-2", "host": os.getenv("MYSQL_REPLICA_2_HOST", "mysql-replica-2")},
@@ -505,9 +505,9 @@ async def stop_master():
     
     try:
         # Step 1: Stop the master container
-        print("Stopping mysql-master container...")
+        print("Stopping mysql-replica-4 container...")
         result = subprocess.run(
-            ["docker", "stop", "mysql-master"],
+            ["docker", "stop", "mysql-replica-4"],
             capture_output=True,
             text=True,
             timeout=10
@@ -634,7 +634,7 @@ async def start_master():
     
     try:
         result = subprocess.run(
-            ["docker", "start", "mysql-master"],
+            ["docker", "start", "mysql-replica-4"],
             capture_output=True,
             text=True,
             timeout=10

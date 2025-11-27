@@ -39,7 +39,7 @@ MYSQL_REPLICAS = [
     {"id": "replica-2", "host": os.getenv("MYSQL_REPLICA_2_HOST", "mysql-replica-2")},
     {"id": "replica-3", "host": os.getenv("MYSQL_REPLICA_3_HOST", "mysql-replica-3")},
 ]
-MYSQL_MASTER_HOST = os.getenv("MYSQL_MASTER_HOST", "mysql-master")
+MYSQL_MASTER_HOST = os.getenv("MYSQL_MASTER_HOST", "mysql-replica-4")
 
 # Global metrics storage
 metrics_lock = threading.Lock()
