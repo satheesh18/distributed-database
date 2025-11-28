@@ -1032,6 +1032,338 @@ async def restart_old_master():
         }
 
 
+# ==================== STRESS TEST ENDPOINTS ====================
+
+class StressTestRequest(BaseModel):
+    """Request model for stress tests"""
+    num_operations: int = 50
+    consistency: ConsistencyLevel = ConsistencyLevel.QUORUM
+
+
+class StressTestResult(BaseModel):
+    """Result model for stress tests"""
+    test_name: str
+    total_operations: int
+    successful: int
+    failed: int
+    duration_seconds: float
+    throughput_ops_per_sec: float
+    avg_latency_ms: float
+    min_latency_ms: float
+    max_latency_ms: float
+    consistency_level: str
+    timestamp_range: Optional[Dict] = None
+    errors: Optional[Dict] = None
+
+
+@app.post("/admin/clear-data")
+async def clear_test_data():
+    """
+    Clear all test data from the database (users and products tables).
+    Keeps the schema intact.
+    """
+    try:
+        with state_lock:
+            master_host = current_master["host"]
+        
+        conn = get_mysql_connection(master_host)
+        cursor = conn.cursor()
+        
+        # Clear test tables
+        cursor.execute("DELETE FROM users")
+        users_deleted = cursor.rowcount
+        
+        cursor.execute("DELETE FROM products")
+        products_deleted = cursor.rowcount
+        
+        # Reset metadata timestamp
+        cursor.execute("UPDATE _metadata SET last_applied_timestamp = 0")
+        
+        cursor.close()
+        conn.close()
+        
+        # Reset consistency metrics
+        with metrics_lock:
+            for level in consistency_metrics:
+                consistency_metrics[level] = {
+                    "count": 0, 
+                    "total_latency": 0.0, 
+                    "failures": 0,
+                    "quorum_not_achieved": 0
+                }
+        
+        return {
+            "success": True,
+            "message": f"Cleared {users_deleted} users and {products_deleted} products",
+            "users_deleted": users_deleted,
+            "products_deleted": products_deleted
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Failed to clear data: {str(e)}",
+            "error": str(e)
+        }
+
+
+@app.post("/admin/stress-test/concurrent-writes", response_model=StressTestResult)
+async def stress_test_concurrent_writes(request: StressTestRequest):
+    """
+    Stress test: Concurrent write operations.
+    
+    Tests:
+    - Timestamp ordering under load
+    - Quorum-based replication performance
+    - System throughput at different consistency levels
+    """
+    num_ops = request.num_operations
+    consistency = request.consistency
+    
+    results = []
+    latencies = []
+    errors = {}
+    timestamps = []
+    
+    # Generate unique test data
+    base_ts = int(time.time() * 1000)
+    
+    async def single_write(i: int):
+        start = time.time()
+        name = f"StressUser_{base_ts}_{i}"
+        email = f"stress_{base_ts}_{i}@test.com"
+        query = f'INSERT INTO users (name, email) VALUES ("{name}", "{email}")'
+        
+        try:
+            result = await handle_write_query(query, consistency)
+            latency = (time.time() - start) * 1000
+            return {
+                "success": result.success,
+                "latency_ms": latency,
+                "timestamp": result.timestamp,
+                "error": None
+            }
+        except HTTPException as e:
+            latency = (time.time() - start) * 1000
+            return {
+                "success": False,
+                "latency_ms": latency,
+                "timestamp": None,
+                "error": e.detail
+            }
+        except Exception as e:
+            latency = (time.time() - start) * 1000
+            return {
+                "success": False,
+                "latency_ms": latency,
+                "timestamp": None,
+                "error": str(e)
+            }
+    
+    # Execute concurrent writes
+    start_time = time.time()
+    tasks = [single_write(i) for i in range(num_ops)]
+    results = await asyncio.gather(*tasks)
+    duration = time.time() - start_time
+    
+    # Analyze results
+    successful = 0
+    for r in results:
+        latencies.append(r["latency_ms"])
+        if r["success"]:
+            successful += 1
+            if r["timestamp"]:
+                timestamps.append(r["timestamp"])
+        else:
+            error = r["error"] or "Unknown error"
+            errors[error] = errors.get(error, 0) + 1
+    
+    failed = num_ops - successful
+    
+    return StressTestResult(
+        test_name="Concurrent Writes",
+        total_operations=num_ops,
+        successful=successful,
+        failed=failed,
+        duration_seconds=round(duration, 3),
+        throughput_ops_per_sec=round(num_ops / duration, 2),
+        avg_latency_ms=round(sum(latencies) / len(latencies), 2) if latencies else 0,
+        min_latency_ms=round(min(latencies), 2) if latencies else 0,
+        max_latency_ms=round(max(latencies), 2) if latencies else 0,
+        consistency_level=consistency.value,
+        timestamp_range={"min": min(timestamps), "max": max(timestamps)} if timestamps else None,
+        errors=errors if errors else None
+    )
+
+
+@app.post("/admin/stress-test/read-write-mix", response_model=StressTestResult)
+async def stress_test_read_write_mix(request: StressTestRequest):
+    """
+    Stress test: Mixed read/write workload (70% reads, 30% writes).
+    
+    Tests:
+    - Real-world mixed workload performance
+    - Read scaling across replicas
+    - Write consistency under mixed load
+    """
+    num_ops = request.num_operations
+    consistency = request.consistency
+    
+    latencies = []
+    errors = {}
+    successful = 0
+    
+    base_ts = int(time.time() * 1000)
+    
+    async def single_operation(i: int):
+        start = time.time()
+        is_write = random.random() < 0.3  # 30% writes
+        
+        try:
+            if is_write:
+                name = f"MixUser_{base_ts}_{i}"
+                email = f"mix_{base_ts}_{i}@test.com"
+                query = f'INSERT INTO users (name, email) VALUES ("{name}", "{email}")'
+                result = await handle_write_query(query, consistency)
+            else:
+                query = "SELECT * FROM users ORDER BY id DESC LIMIT 10"
+                result = await handle_read_query(query, consistency)
+            
+            latency = (time.time() - start) * 1000
+            return {"success": result.success, "latency_ms": latency, "error": None}
+        except HTTPException as e:
+            latency = (time.time() - start) * 1000
+            return {"success": False, "latency_ms": latency, "error": e.detail}
+        except Exception as e:
+            latency = (time.time() - start) * 1000
+            return {"success": False, "latency_ms": latency, "error": str(e)}
+    
+    start_time = time.time()
+    tasks = [single_operation(i) for i in range(num_ops)]
+    results = await asyncio.gather(*tasks)
+    duration = time.time() - start_time
+    
+    for r in results:
+        latencies.append(r["latency_ms"])
+        if r["success"]:
+            successful += 1
+        else:
+            error = r["error"] or "Unknown error"
+            errors[error] = errors.get(error, 0) + 1
+    
+    return StressTestResult(
+        test_name="Read/Write Mix (70/30)",
+        total_operations=num_ops,
+        successful=successful,
+        failed=num_ops - successful,
+        duration_seconds=round(duration, 3),
+        throughput_ops_per_sec=round(num_ops / duration, 2),
+        avg_latency_ms=round(sum(latencies) / len(latencies), 2) if latencies else 0,
+        min_latency_ms=round(min(latencies), 2) if latencies else 0,
+        max_latency_ms=round(max(latencies), 2) if latencies else 0,
+        consistency_level=consistency.value,
+        errors=errors if errors else None
+    )
+
+
+@app.post("/admin/stress-test/consistency-comparison")
+async def stress_test_consistency_comparison(num_operations: int = 30):
+    """
+    Compare performance across all consistency levels.
+    
+    Tests:
+    - ONE vs QUORUM vs ALL latency
+    - Throughput differences
+    - Trade-offs visualization
+    """
+    results = {}
+    base_ts = int(time.time() * 1000)
+    
+    for level in [ConsistencyLevel.ONE, ConsistencyLevel.QUORUM, ConsistencyLevel.ALL]:
+        latencies = []
+        successful = 0
+        errors = {}
+        
+        async def single_write(i: int, lvl: ConsistencyLevel):
+            start = time.time()
+            name = f"Comp_{lvl.value}_{base_ts}_{i}"
+            email = f"comp_{lvl.value}_{base_ts}_{i}@test.com"
+            query = f'INSERT INTO users (name, email) VALUES ("{name}", "{email}")'
+            
+            try:
+                result = await handle_write_query(query, lvl)
+                latency = (time.time() - start) * 1000
+                return {"success": result.success, "latency_ms": latency, "error": None}
+            except HTTPException as e:
+                latency = (time.time() - start) * 1000
+                return {"success": False, "latency_ms": latency, "error": e.detail}
+            except Exception as e:
+                latency = (time.time() - start) * 1000
+                return {"success": False, "latency_ms": latency, "error": str(e)}
+        
+        start_time = time.time()
+        tasks = [single_write(i, level) for i in range(num_operations)]
+        test_results = await asyncio.gather(*tasks)
+        duration = time.time() - start_time
+        
+        for r in test_results:
+            latencies.append(r["latency_ms"])
+            if r["success"]:
+                successful += 1
+            elif r["error"]:
+                errors[r["error"]] = errors.get(r["error"], 0) + 1
+        
+        results[level.value] = {
+            "total": num_operations,
+            "successful": successful,
+            "failed": num_operations - successful,
+            "duration_seconds": round(duration, 3),
+            "throughput_ops_per_sec": round(num_operations / duration, 2),
+            "avg_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else 0,
+            "min_latency_ms": round(min(latencies), 2) if latencies else 0,
+            "max_latency_ms": round(max(latencies), 2) if latencies else 0,
+            "errors": errors if errors else None
+        }
+    
+    return {
+        "test_name": "Consistency Level Comparison",
+        "operations_per_level": num_operations,
+        "results": results,
+        "summary": {
+            "fastest": min(results.keys(), key=lambda k: results[k]["avg_latency_ms"]),
+            "most_reliable": max(results.keys(), key=lambda k: results[k]["successful"]),
+            "highest_throughput": max(results.keys(), key=lambda k: results[k]["throughput_ops_per_sec"])
+        }
+    }
+
+
+@app.get("/admin/stress-test/data-count")
+async def get_data_count():
+    """Get current count of test data in database"""
+    try:
+        with state_lock:
+            master_host = current_master["host"]
+        
+        conn = get_mysql_connection(master_host)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM users")
+        users_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM products")
+        products_count = cursor.fetchone()[0]
+        
+        cursor.close()
+        conn.close()
+        
+        return {
+            "users": users_count,
+            "products": products_count,
+            "total": users_count + products_count
+        }
+    except Exception as e:
+        return {"error": str(e), "users": 0, "products": 0, "total": 0}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -274,6 +274,214 @@
         </div>
       </div>
     </Panel>
+
+    <!-- Stress Testing -->
+    <Panel header="🔥 Stress Testing" class="mb-4">
+      <div class="stress-test-section">
+        <p class="text-sm mb-3">Test distributed system performance under load. These tests demonstrate timestamp ordering, quorum replication, and consistency trade-offs.</p>
+        
+        <!-- Data Count & Clear -->
+        <div class="metric-card mb-3">
+          <div class="flex justify-content-between align-items-center">
+            <div>
+              <div class="metric-label">Current Test Data</div>
+              <div class="metric-value">
+                <Tag severity="info" class="mr-2">{{ dataCount.users }} users</Tag>
+                <Tag severity="info">{{ dataCount.products }} products</Tag>
+              </div>
+            </div>
+            <Button 
+              label="Clear All Data" 
+              icon="pi pi-trash" 
+              @click="clearData"
+              severity="secondary"
+              size="small"
+              :loading="clearingData"
+            />
+          </div>
+        </div>
+
+        <!-- Test Configuration -->
+        <div class="grid grid-2 mb-3">
+          <div>
+            <label class="block mb-2 font-semibold">Operations Count</label>
+            <Dropdown 
+              v-model="stressTestOps" 
+              :options="[10, 25, 50, 100, 200]" 
+              placeholder="Select count"
+              class="w-full"
+            />
+          </div>
+          <div>
+            <label class="block mb-2 font-semibold">Consistency Level</label>
+            <Dropdown 
+              v-model="stressTestConsistency" 
+              :options="consistencyOptions" 
+              optionLabel="label" 
+              optionValue="value"
+              placeholder="Select level"
+              class="w-full"
+            />
+          </div>
+        </div>
+
+        <!-- Test Buttons -->
+        <div class="action-buttons mb-3">
+          <Button 
+            label="Concurrent Writes" 
+            icon="pi pi-bolt" 
+            @click="runConcurrentWritesTest"
+            severity="primary"
+            :loading="stressTestRunning === 'concurrent'"
+            :disabled="stressTestRunning !== null"
+          />
+          <Button 
+            label="Read/Write Mix" 
+            icon="pi pi-sync" 
+            @click="runReadWriteMixTest"
+            severity="info"
+            :loading="stressTestRunning === 'mix'"
+            :disabled="stressTestRunning !== null"
+          />
+          <Button 
+            label="Compare Consistency Levels" 
+            icon="pi pi-chart-bar" 
+            @click="runConsistencyComparisonTest"
+            severity="warning"
+            :loading="stressTestRunning === 'comparison'"
+            :disabled="stressTestRunning !== null"
+          />
+        </div>
+
+        <!-- Test Progress -->
+        <div v-if="stressTestRunning" class="mb-3">
+          <ProgressBar mode="indeterminate" style="height: 6px" />
+          <p class="text-sm mt-2" style="color: orange;">
+            ⏳ Running {{ stressTestRunning }} test with {{ stressTestOps }} operations...
+          </p>
+        </div>
+
+        <!-- Test Results -->
+        <div v-if="stressTestResult" class="stress-test-results">
+          <h4 class="mb-3">📊 {{ stressTestResult.test_name }} Results</h4>
+          
+          <!-- Summary Cards -->
+          <div class="grid grid-4 mb-3">
+            <div class="result-card">
+              <div class="result-value">{{ stressTestResult.throughput_ops_per_sec }}</div>
+              <div class="result-label">ops/sec</div>
+            </div>
+            <div class="result-card">
+              <div class="result-value">{{ stressTestResult.avg_latency_ms }}ms</div>
+              <div class="result-label">avg latency</div>
+            </div>
+            <div class="result-card success">
+              <div class="result-value">{{ stressTestResult.successful }}/{{ stressTestResult.total_operations }}</div>
+              <div class="result-label">successful</div>
+            </div>
+            <div class="result-card">
+              <div class="result-value">{{ stressTestResult.duration_seconds }}s</div>
+              <div class="result-label">duration</div>
+            </div>
+          </div>
+
+          <!-- Detailed Stats -->
+          <DataTable :value="[stressTestResult]" class="mb-3">
+            <Column field="consistency_level" header="Consistency">
+              <template #body="slotProps">
+                <Tag :severity="getConsistencySeverity(slotProps.data.consistency_level)">
+                  {{ slotProps.data.consistency_level }}
+                </Tag>
+              </template>
+            </Column>
+            <Column field="min_latency_ms" header="Min Latency">
+              <template #body="slotProps">{{ slotProps.data.min_latency_ms }}ms</template>
+            </Column>
+            <Column field="max_latency_ms" header="Max Latency">
+              <template #body="slotProps">{{ slotProps.data.max_latency_ms }}ms</template>
+            </Column>
+            <Column field="failed" header="Failed">
+              <template #body="slotProps">
+                <Tag :severity="slotProps.data.failed > 0 ? 'danger' : 'success'">
+                  {{ slotProps.data.failed }}
+                </Tag>
+              </template>
+            </Column>
+          </DataTable>
+
+          <!-- Timestamp Range (for writes) -->
+          <div v-if="stressTestResult.timestamp_range" class="metric-card mb-3">
+            <div class="metric-label">Timestamp Range (proves ordering)</div>
+            <div class="metric-value">
+              {{ stressTestResult.timestamp_range.min }} → {{ stressTestResult.timestamp_range.max }}
+              <Tag severity="success" class="ml-2">Sequential ✓</Tag>
+            </div>
+          </div>
+
+          <!-- Errors if any -->
+          <div v-if="stressTestResult.errors" class="mt-3">
+            <Message severity="warn" :closable="false">
+              <div class="font-semibold mb-2">Errors encountered:</div>
+              <div v-for="(count, error) in stressTestResult.errors" :key="error" class="text-sm">
+                • {{ error }}: {{ count }} occurrences
+              </div>
+            </Message>
+          </div>
+        </div>
+
+        <!-- Consistency Comparison Results -->
+        <div v-if="consistencyComparisonResult" class="stress-test-results">
+          <h4 class="mb-3">📊 Consistency Level Comparison</h4>
+          
+          <!-- Summary -->
+          <div class="grid grid-3 mb-3">
+            <div class="result-card">
+              <div class="result-value">{{ consistencyComparisonResult.summary.fastest }}</div>
+              <div class="result-label">Fastest</div>
+            </div>
+            <div class="result-card success">
+              <div class="result-value">{{ consistencyComparisonResult.summary.most_reliable }}</div>
+              <div class="result-label">Most Reliable</div>
+            </div>
+            <div class="result-card">
+              <div class="result-value">{{ consistencyComparisonResult.summary.highest_throughput }}</div>
+              <div class="result-label">Highest Throughput</div>
+            </div>
+          </div>
+
+          <!-- Comparison Table -->
+          <DataTable :value="consistencyComparisonArray">
+            <Column field="level" header="Level">
+              <template #body="slotProps">
+                <Tag :severity="getConsistencySeverity(slotProps.data.level)">
+                  {{ slotProps.data.level }}
+                </Tag>
+              </template>
+            </Column>
+            <Column field="successful" header="Success">
+              <template #body="slotProps">
+                <Tag :severity="slotProps.data.successful === slotProps.data.total ? 'success' : 'warning'">
+                  {{ slotProps.data.successful }}/{{ slotProps.data.total }}
+                </Tag>
+              </template>
+            </Column>
+            <Column field="avg_latency_ms" header="Avg Latency">
+              <template #body="slotProps">
+                <Tag :severity="getLatencySeverity(slotProps.data.avg_latency_ms)">
+                  {{ slotProps.data.avg_latency_ms }}ms
+                </Tag>
+              </template>
+            </Column>
+            <Column field="throughput_ops_per_sec" header="Throughput">
+              <template #body="slotProps">{{ slotProps.data.throughput_ops_per_sec }} ops/s</template>
+            </Column>
+            <Column field="duration_seconds" header="Duration">
+              <template #body="slotProps">{{ slotProps.data.duration_seconds }}s</template>
+            </Column>
+          </DataTable>
+        </div>
+      </div>
+    </Panel>
   </div>
 </template>
 
@@ -314,6 +522,16 @@ const consistencyLevel = ref('QUORUM')
 const consistencyMetrics = ref<any>({})
 const consistencyMetricsArray = ref<any[]>([])
 const loadingConsistencyMetrics = ref(false)
+
+// Stress test state
+const stressTestRunning = ref<string | null>(null)
+const stressTestOps = ref(50)
+const stressTestConsistency = ref('QUORUM')
+const stressTestResult = ref<any>(null)
+const consistencyComparisonResult = ref<any>(null)
+const consistencyComparisonArray = ref<any[]>([])
+const dataCount = ref({ users: 0, products: 0, total: 0 })
+const clearingData = ref(false)
 
 const consistencyOptions = [
   { label: 'ONE', value: 'ONE', description: 'Fastest - Eventual Consistency' },
@@ -930,12 +1148,159 @@ const triggerFailover = async () => {
   }
 }
 
+// ==================== STRESS TEST FUNCTIONS ====================
+
+const fetchDataCount = async () => {
+  try {
+    const response = await fetch(`${API_BASE}/admin/stress-test/data-count`)
+    const data = await response.json()
+    dataCount.value = data
+  } catch (error) {
+    console.error('Failed to fetch data count:', error)
+  }
+}
+
+const clearData = async () => {
+  clearingData.value = true
+  stressTestResult.value = null
+  consistencyComparisonResult.value = null
+  
+  try {
+    const response = await fetch(`${API_BASE}/admin/clear-data`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    const result = await response.json()
+    
+    if (result.success) {
+      await fetchDataCount()
+      await fetchConsistencyMetrics()
+    }
+  } catch (error) {
+    console.error('Failed to clear data:', error)
+  } finally {
+    clearingData.value = false
+  }
+}
+
+const runConcurrentWritesTest = async () => {
+  stressTestRunning.value = 'concurrent'
+  stressTestResult.value = null
+  consistencyComparisonResult.value = null
+  
+  try {
+    const response = await fetch(`${API_BASE}/admin/stress-test/concurrent-writes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        num_operations: stressTestOps.value,
+        consistency: stressTestConsistency.value
+      })
+    })
+    
+    const result = await response.json()
+    stressTestResult.value = result
+    
+    // Refresh metrics after test
+    await fetchDataCount()
+    await fetchMetrics()
+    await fetchConsistencyMetrics()
+  } catch (error: any) {
+    stressTestResult.value = {
+      test_name: 'Concurrent Writes',
+      total_operations: stressTestOps.value,
+      successful: 0,
+      failed: stressTestOps.value,
+      duration_seconds: 0,
+      throughput_ops_per_sec: 0,
+      avg_latency_ms: 0,
+      min_latency_ms: 0,
+      max_latency_ms: 0,
+      consistency_level: stressTestConsistency.value,
+      errors: { [error?.message || 'Connection failed']: stressTestOps.value }
+    }
+  } finally {
+    stressTestRunning.value = null
+  }
+}
+
+const runReadWriteMixTest = async () => {
+  stressTestRunning.value = 'mix'
+  stressTestResult.value = null
+  consistencyComparisonResult.value = null
+  
+  try {
+    const response = await fetch(`${API_BASE}/admin/stress-test/read-write-mix`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        num_operations: stressTestOps.value,
+        consistency: stressTestConsistency.value
+      })
+    })
+    
+    const result = await response.json()
+    stressTestResult.value = result
+    
+    await fetchDataCount()
+    await fetchMetrics()
+    await fetchConsistencyMetrics()
+  } catch (error: any) {
+    stressTestResult.value = {
+      test_name: 'Read/Write Mix',
+      total_operations: stressTestOps.value,
+      successful: 0,
+      failed: stressTestOps.value,
+      duration_seconds: 0,
+      throughput_ops_per_sec: 0,
+      avg_latency_ms: 0,
+      min_latency_ms: 0,
+      max_latency_ms: 0,
+      consistency_level: stressTestConsistency.value,
+      errors: { [error?.message || 'Connection failed']: stressTestOps.value }
+    }
+  } finally {
+    stressTestRunning.value = null
+  }
+}
+
+const runConsistencyComparisonTest = async () => {
+  stressTestRunning.value = 'comparison'
+  stressTestResult.value = null
+  consistencyComparisonResult.value = null
+  
+  try {
+    const response = await fetch(`${API_BASE}/admin/stress-test/consistency-comparison?num_operations=${Math.min(stressTestOps.value, 30)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    
+    const result = await response.json()
+    consistencyComparisonResult.value = result
+    
+    // Convert to array for table
+    consistencyComparisonArray.value = Object.keys(result.results).map(level => ({
+      level,
+      ...result.results[level]
+    }))
+    
+    await fetchDataCount()
+    await fetchMetrics()
+    await fetchConsistencyMetrics()
+  } catch (error: any) {
+    console.error('Consistency comparison test failed:', error)
+  } finally {
+    stressTestRunning.value = null
+  }
+}
+
 // Lifecycle
 onMounted(() => {
   checkServiceHealth()
   fetchMetrics()
   fetchSystemStatus()
   fetchConsistencyMetrics()
+  fetchDataCount()
   
   // Refresh every 5 seconds
   refreshInterval = setInterval(() => {
@@ -943,6 +1308,7 @@ onMounted(() => {
     fetchMetrics()
     fetchSystemStatus()
     fetchConsistencyMetrics()
+    fetchDataCount()
   }, 5000)
 })
 
@@ -959,6 +1325,8 @@ onUnmounted(() => {
 .mb-4 { margin-bottom: 1rem; }
 .mt-2 { margin-top: 0.5rem; }
 .mt-3 { margin-top: 0.75rem; }
+.ml-2 { margin-left: 0.5rem; }
+.mr-2 { margin-right: 0.5rem; }
 .w-full { width: 100%; }
 .block { display: block; }
 .flex { display: flex; }
@@ -967,4 +1335,75 @@ onUnmounted(() => {
 .text-sm { font-size: 0.875rem; }
 .text-color-secondary { color: #64748b; }
 .font-semibold { font-weight: 600; }
+
+/* Grid layouts */
+.grid { display: grid; gap: 1rem; }
+.grid-2 { grid-template-columns: repeat(2, 1fr); }
+.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-4 { grid-template-columns: repeat(4, 1fr); }
+
+/* Stress test result cards */
+.result-card {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 12px;
+  padding: 1rem;
+  text-align: center;
+  color: white;
+}
+
+.result-card.success {
+  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+}
+
+.result-value {
+  font-size: 1.5rem;
+  font-weight: bold;
+  margin-bottom: 0.25rem;
+}
+
+.result-label {
+  font-size: 0.75rem;
+  opacity: 0.9;
+  text-transform: uppercase;
+}
+
+/* Stress test section */
+.stress-test-section {
+  padding: 0.5rem 0;
+}
+
+.stress-test-results {
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-top: 1rem;
+}
+
+/* Metric cards */
+.metric-card {
+  background: #f1f5f9;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.metric-label {
+  font-size: 0.75rem;
+  color: #64748b;
+  text-transform: uppercase;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.metric-value {
+  font-size: 1rem;
+  color: #1e293b;
+  font-weight: 500;
+}
+
+/* Action buttons */
+.action-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
 </style>
