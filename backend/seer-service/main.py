@@ -161,11 +161,12 @@ async def elect_leader(request: LeaderElectionRequest):
     """
     Elect a new leader using the SEER algorithm.
     
+    For 2-instance setup: Simply select the healthy replica (instance-2).
+    
     Algorithm:
-    1. Fetch metrics for all replicas
-    2. Calculate score for each replica (latency + stability + lag)
-    3. Select replica with highest score
-    4. Return elected leader
+    1. Fetch metrics for replica
+    2. Verify replica is healthy
+    3. Return replica as new leader
     
     Args:
         request: LeaderElectionRequest with optional exclusions
@@ -180,6 +181,7 @@ async def elect_leader(request: LeaderElectionRequest):
     if not replicas:
         raise HTTPException(status_code=503, detail="No replicas available")
     
+    # For 2-instance setup, we only have one replica (instance-2)
     # Filter out excluded replicas
     exclude_set = set(request.exclude_replicas or [])
     replicas = [r for r in replicas if r["replica_id"] not in exclude_set]

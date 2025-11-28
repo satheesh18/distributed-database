@@ -1,6 +1,24 @@
 [mysqld]
-# Server identification (will be overridden by docker-compose for each replica)
+# Server identification
 server-id = 2
+
+# GTID for replication
+gtid_mode = ON
+enforce_gtid_consistency = ON
+
+# Relay log for replication
+relay-log = relay-bin
+relay_log_recovery = ON
+relay_log_purge = ON
+
+# Read-only mode (enabled via init script)
+# read_only = ON
+# super_read_only = ON
+
+# Replication settings
+sync_relay_log = 1
+slave_parallel_workers = 4
+slave_parallel_type = LOGICAL_CLOCK
 
 # Performance schema
 performance_schema = ON
@@ -8,5 +26,5 @@ performance_schema = ON
 # General settings
 max_connections = 200
 
-# Read-only mode (can be disabled during promotion to master)
-# read_only = ON
+# Allow connections
+bind-address = 0.0.0.0

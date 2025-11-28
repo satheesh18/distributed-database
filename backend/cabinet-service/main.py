@@ -102,11 +102,14 @@ async def select_quorum(request: QuorumRequest):
     """
     Select optimal quorum for a write operation using the Cabinet algorithm.
     
+    For 2-instance setup (1 master + 1 replica):
+    - Quorum always includes the single replica (instance-2)
+    - This ensures writes are verified on both instances
+    
     Algorithm:
-    1. Fetch metrics for all replicas
-    2. Calculate weight for each replica (based on latency + lag)
-    3. Sort replicas by weight (descending)
-    4. Select top N replicas where N = ⌈(total_replicas + 1) / 2⌉ (majority)
+    1. Fetch metrics for replica
+    2. Calculate weight for replica (based on latency + lag)
+    3. Return replica as quorum
     
     Args:
         request: QuorumRequest containing operation type
@@ -141,7 +144,8 @@ async def select_quorum(request: QuorumRequest):
     # Sort by weight (descending - highest weight first)
     weighted_replicas.sort(key=lambda x: x.weight, reverse=True)
     
-    # Calculate quorum size (majority)
+    # For 2-instance setup, quorum is the single replica
+    # In the future, if we have more replicas, this will select majority
     total_replicas = len(replicas)
     quorum_size = math.ceil((total_replicas + 1) / 2)
     

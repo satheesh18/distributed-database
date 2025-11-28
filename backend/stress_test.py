@@ -27,7 +27,7 @@ from typing import List, Dict
 import json
 from datetime import datetime
 
-API_BASE = "http://localhost:8000"
+API_BASE = "http://localhost:9000"
 METRICS_URL = "http://localhost:8003/metrics"
 
 class Colors:

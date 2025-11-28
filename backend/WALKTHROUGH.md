@@ -18,12 +18,14 @@ The system consists of 10 Docker containers:
 | mysql-replica-1 | Replica database | 3307 |
 | mysql-replica-2 | Replica database | 3308 |
 | mysql-replica-3 | Replica database | 3309 |
-| coordinator | Main API endpoint | 8000 |
-| timestamp-service-1 | Odd timestamps | 8001 |
-| timestamp-service-2 | Even timestamps | 8002 |
-| metrics-collector | Performance monitoring | 8003 |
-| cabinet-service | Quorum selection | 8004 |
-| seer-service | Leader election | 8005 |
+| coordinator | Main API endpoint | 9000 |
+| mysql-instance-1 | Master MySQL | 3306 |
+| mysql-instance-2 | Replica MySQL | 3307 |
+| mysql-instance-3 | Replica MySQL | 3308 |
+| mysql-instance-4 | Replica MySQL | 3309 |
+| metrics-collector | Prometheus-style metrics | 9003 |
+| cabinet-service | Quorum management | 9004 |
+| seer-service | Leader election | 9005 |
 
 ## Implementation Details
 
@@ -68,7 +70,7 @@ curl http://localhost:8002/timestamp
 **Test Results**:
 ```bash
 # Write operation
-curl -X POST http://localhost:8000/query \
+curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
   -d '{"query": "INSERT INTO users (name, email) VALUES (\"Alice\", \"alice@example.com\")"}'
 
@@ -82,7 +84,7 @@ Response:
 }
 
 # Second write
-curl -X POST http://localhost:8000/query \
+curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
   -d '{"query": "INSERT INTO users (name, email) VALUES (\"Bob\", \"bob@example.com\")"}'
 
@@ -119,7 +121,7 @@ Response:
 
 **Test Results**:
 ```bash
-curl -X POST http://localhost:8000/query \
+curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
   -d '{"query": "SELECT * FROM users"}'
 
@@ -286,7 +288,7 @@ Response:
 
 **Test Results**:
 ```bash
-curl http://localhost:8000/status
+curl http://localhost:9000/status
 
 Response:
 {

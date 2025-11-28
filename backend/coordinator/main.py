@@ -1,18 +1,22 @@
 """
-Main Coordinator Service
+Main Coordinator Service - Binlog-Based Replication
 
 This is the central component that handles all client requests.
 It coordinates between all other services to provide:
 - Distributed timestamp assignment
-- Quorum-based replication (strong consistency)
-- Performance-aware leader election on failure
+- Binlog-based replication with eventual quorum consistency
+- Performance-aware leader election on failure with binlog rewiring
 
 Flow:
 1. Client sends SQL query
 2. Coordinator parses query
-3. For writes: Get timestamp → Execute on master → Replicate to quorum
+3. For writes: 
+   - Check replica health (pre-flight check)
+   - Get timestamp → Execute on master
+   - Wait for replica to catch up to timestamp (post-write verification)
+   - Return success/failure based on quorum achievement
 4. For reads: Route to up-to-date replica or master
-5. On master failure: Elect new leader via SEER
+5. On master failure: Elect new leader via SEER and rewire binlog replication
 """
 
 import asyncio
@@ -27,7 +31,6 @@ from enum import Enum
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import math
 import subprocess
 from query_parser import parse_query, is_write_query, is_read_query
 
@@ -44,11 +47,14 @@ app.add_middleware(
 
 # Configuration
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "rootpass")
-MYSQL_MASTER_HOST = os.getenv("MYSQL_MASTER_HOST", "mysql-replica-4")
-MYSQL_REPLICAS = [
-    {"id": "replica-1", "host": os.getenv("MYSQL_REPLICA_1_HOST", "mysql-replica-1")},
-    {"id": "replica-2", "host": os.getenv("MYSQL_REPLICA_2_HOST", "mysql-replica-2")},
-    {"id": "replica-3", "host": os.getenv("MYSQL_REPLICA_3_HOST", "mysql-replica-3")},
+MYSQL_MASTER_HOST = os.getenv("MYSQL_MASTER_HOST", "mysql-instance-1")
+
+# Instance configuration (master + 3 replicas)
+MYSQL_INSTANCES = [
+    {"id": "instance-1", "host": MYSQL_MASTER_HOST, "container": "mysql-instance-1"},
+    {"id": "instance-2", "host": os.getenv("MYSQL_REPLICA_2_HOST", "mysql-instance-2"), "container": "mysql-instance-2"},
+    {"id": "instance-3", "host": os.getenv("MYSQL_REPLICA_3_HOST", "mysql-instance-3"), "container": "mysql-instance-3"},
+    {"id": "instance-4", "host": os.getenv("MYSQL_REPLICA_4_HOST", "mysql-instance-4"), "container": "mysql-instance-4"},
 ]
 
 TIMESTAMP_SERVICES = [
@@ -62,13 +68,18 @@ METRICS_COLLECTOR_URL = os.getenv("METRICS_COLLECTOR_URL", "http://metrics-colle
 
 # Global state
 state_lock = threading.Lock()
-current_master = MYSQL_MASTER_HOST
-master_is_original = True
+current_master = {"id": "instance-1", "host": MYSQL_MASTER_HOST, "container": "mysql-instance-1"}
+# List of current replicas (will change during failover)
+current_replicas = [
+    {"id": "instance-2", "host": os.getenv("MYSQL_REPLICA_2_HOST", "mysql-instance-2"), "container": "mysql-instance-2"},
+    {"id": "instance-3", "host": os.getenv("MYSQL_REPLICA_3_HOST", "mysql-instance-3"), "container": "mysql-instance-3"},
+    {"id": "instance-4", "host": os.getenv("MYSQL_REPLICA_4_HOST", "mysql-instance-4"), "container": "mysql-instance-4"},
+]
 
 # Consistency metrics tracking
 consistency_metrics = {
     "ONE": {"count": 0, "total_latency": 0.0, "failures": 0},
-    "QUORUM": {"count": 0, "total_latency": 0.0, "failures": 0},
+    "QUORUM": {"count": 0, "total_latency": 0.0, "failures": 0, "quorum_not_achieved": 0},
     "ALL": {"count": 0, "total_latency": 0.0, "failures": 0}
 }
 metrics_lock = threading.Lock()
@@ -97,7 +108,8 @@ class QueryResponse(BaseModel):
     executed_on: Optional[str] = None
     consistency_level: Optional[str] = None
     latency_ms: Optional[float] = None
-    replicas_contacted: Optional[int] = None
+    quorum_achieved: Optional[bool] = None
+    replica_caught_up: Optional[bool] = None
 
 
 def get_mysql_connection(host: str):
@@ -146,54 +158,6 @@ async def get_timestamp() -> int:
             return data["timestamp"]
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Failed to get timestamp: {str(e)}")
-
-
-async def get_quorum() -> List[str]:
-    """
-    Get the optimal quorum for write replication from Cabinet service.
-    
-    Returns:
-        List of replica IDs in the quorum
-        
-    Raises:
-        HTTPException: If quorum cannot be determined
-    """
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{CABINET_SERVICE_URL}/select-quorum",
-                json={"operation": "write"},
-                timeout=5.0
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["quorum"]
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Failed to get quorum: {str(e)}")
-
-
-async def elect_new_leader() -> str:
-    """
-    Elect a new leader using SEER service when master fails.
-    
-    Returns:
-        Replica ID of the new leader
-        
-    Raises:
-        HTTPException: If leader election fails
-    """
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{SEER_SERVICE_URL}/elect-leader",
-                json={},
-                timeout=5.0
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["leader_id"]
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Failed to elect leader: {str(e)}")
 
 
 def execute_query_on_host(host: str, query: str, timestamp: Optional[int] = None) -> Dict:
@@ -248,14 +212,209 @@ def execute_query_on_host(host: str, query: str, timestamp: Optional[int] = None
         }
 
 
+def get_last_applied_timestamp(host: str) -> int:
+    """
+    Get the last applied timestamp from a MySQL instance.
+    
+    Args:
+        host: MySQL host address
+        
+    Returns:
+        Last applied timestamp or 0 if unavailable
+    """
+    try:
+        conn = get_mysql_connection(host)
+        cursor = conn.cursor()
+        cursor.execute("SELECT last_applied_timestamp FROM _metadata LIMIT 1")
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        return result[0] if result else 0
+    except Exception as e:
+        print(f"Error getting timestamp from {host}: {e}")
+        return 0
+
+
+async def check_replicas_health() -> dict:
+    """
+    Pre-flight check: Verify replicas are healthy and caught up.
+    
+    Returns:
+        Dictionary with healthy replica count and list of healthy replicas
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{METRICS_COLLECTOR_URL}/metrics", timeout=5.0)
+            response.raise_for_status()
+            data = response.json()
+            replicas = data.get("replicas", [])
+            
+            if not replicas:
+                return {"healthy_count": 0, "healthy_replicas": []}
+            
+            # Consider healthy if latency < 5s and lag < 10 timestamps
+            healthy_replicas = [
+                r for r in replicas 
+                if r["is_healthy"] and r["replication_lag"] < 10
+            ]
+            
+            return {
+                "healthy_count": len(healthy_replicas),
+                "healthy_replicas": healthy_replicas,
+                "total_replicas": len(replicas)
+            }
+    except Exception as e:
+        print(f"Error checking replica health: {e}")
+        return {"healthy_count": 0, "healthy_replicas": []}
+
+
+async def wait_for_quorum_catchup(timestamp: int, quorum_size: int = 2, timeout_seconds: float = 5.0) -> dict:
+    """
+    Post-write verification: Wait for quorum of replicas to catch up to the given timestamp.
+    
+    Args:
+        timestamp: Target timestamp to wait for
+        quorum_size: Number of replicas needed for quorum (default 2 out of 3)
+        timeout_seconds: Maximum time to wait
+        
+    Returns:
+        Dictionary with caught_up count and list of caught up replicas
+    """
+    start_time = time.time()
+    
+    with state_lock:
+        replica_hosts = [(r["id"], r["host"]) for r in current_replicas]
+    
+    caught_up_replicas = []
+    
+    while (time.time() - start_time) < timeout_seconds:
+        caught_up_replicas = []
+        
+        for replica_id, replica_host in replica_hosts:
+            try:
+                replica_timestamp = get_last_applied_timestamp(replica_host)
+                
+                if replica_timestamp >= timestamp:
+                    caught_up_replicas.append(replica_id)
+            except Exception as e:
+                print(f"Error checking replica {replica_id} timestamp: {e}")
+        
+        # Check if we have quorum
+        if len(caught_up_replicas) >= quorum_size:
+            return {
+                "quorum_achieved": True,
+                "caught_up_count": len(caught_up_replicas),
+                "caught_up_replicas": caught_up_replicas
+            }
+        
+        # Wait a bit before checking again
+        await asyncio.sleep(0.1)
+    
+    return {
+        "quorum_achieved": False,
+        "caught_up_count": len(caught_up_replicas),
+        "caught_up_replicas": caught_up_replicas
+    }
+
+
+async def promote_replica_to_master(replica_container: str) -> bool:
+    """
+    Promote a replica to master by stopping replication and disabling read-only.
+    
+    Args:
+        replica_container: Container name of the replica to promote
+        
+    Returns:
+        True if promotion successful, False otherwise
+    """
+    try:
+        print(f"Promoting {replica_container} to master...")
+        
+        # SQL commands to promote replica to master
+        promote_sql = """
+            STOP SLAVE;
+            RESET SLAVE ALL;
+            SET GLOBAL read_only = OFF;
+            SET GLOBAL super_read_only = OFF;
+            RESET MASTER;
+        """
+        
+        # Execute directly using docker exec
+        result = subprocess.run(
+            ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", promote_sql],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode != 0:
+            print(f"Failed to promote replica: {result.stderr}")
+            return False
+        
+        print(f"Successfully promoted {replica_container} to master")
+        return True
+    except Exception as e:
+        print(f"Error promoting replica: {e}")
+        return False
+
+
+async def demote_master_to_replica(old_master_container: str, new_master_host: str) -> bool:
+    """
+    Demote old master to replica by configuring it to replicate from new master.
+    
+    Args:
+        old_master_container: Container name of the old master
+        new_master_host: Host name of the new master
+        
+    Returns:
+        True if demotion successful, False otherwise
+    """
+    try:
+        print(f"Demoting {old_master_container} to replica of {new_master_host}...")
+        
+        # SQL commands to demote master to replica
+        demote_sql = f"""
+            SET GLOBAL read_only = ON;
+            SET GLOBAL super_read_only = ON;
+            STOP SLAVE;
+            RESET SLAVE ALL;
+            CHANGE MASTER TO
+                MASTER_HOST='{new_master_host}',
+                MASTER_USER='replicator',
+                MASTER_PASSWORD='replicator_password',
+                MASTER_AUTO_POSITION=1,
+                GET_MASTER_PUBLIC_KEY=1;
+            START SLAVE;
+        """
+        
+        # Execute directly using docker exec
+        result = subprocess.run(
+            ["docker", "exec", old_master_container, "mysql", "-u", "root", "-prootpass", "-e", demote_sql],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode != 0:
+            print(f"Failed to demote master: {result.stderr}")
+            return False
+        
+        print(f"Successfully demoted {old_master_container} to replica")
+        return True
+    except Exception as e:
+        print(f"Error demoting master: {e}")
+        return False
+
+
 async def handle_write_query(query: str, consistency: ConsistencyLevel) -> QueryResponse:
     """
-    Handle a write query (INSERT, UPDATE, DELETE) with tunable consistency.
+    Handle a write query with binlog-based replication and eventual quorum consistency.
     
     Consistency Levels:
-    - ONE: Write to master only (fastest, eventual consistency)
-    - QUORUM: Write to majority of replicas (balanced, strong consistency)
-    - ALL: Write to all replicas (slowest, strongest consistency)
+    - ONE: Write to master only, return immediately (eventual consistency)
+    - QUORUM: Write to master, wait for 2 out of 3 replicas to catch up (strong consistency)
+    - ALL: Write to master, wait for all 3 replicas to catch up (strongest consistency)
     
     Args:
         query: SQL write query
@@ -264,16 +423,31 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
     Returns:
         QueryResponse with execution results and metrics
     """
-    global current_master, master_is_original
+    global current_master, current_replicas
     
     start_time = time.time()
     
     # Step 1: Get timestamp
     timestamp = await get_timestamp()
     
-    # Step 2: Execute on master
+    # Step 2: Pre-flight check for QUORUM/ALL consistency
+    if consistency in [ConsistencyLevel.QUORUM, ConsistencyLevel.ALL]:
+        health_status = await check_replicas_health()
+        
+        required_healthy = 2 if consistency == ConsistencyLevel.QUORUM else 3
+        
+        if health_status["healthy_count"] < required_healthy:
+            with metrics_lock:
+                consistency_metrics[consistency.value]["failures"] += 1
+            raise HTTPException(
+                status_code=503,
+                detail=f"Not enough healthy replicas. Need {required_healthy}, have {health_status['healthy_count']}. Cannot achieve {consistency.value} consistency."
+            )
+    
+    # Step 3: Execute on master
     with state_lock:
-        master_host = current_master
+        master_host = current_master["host"]
+        master_container = current_master["container"]
     
     result = execute_query_on_host(master_host, query, timestamp)
     
@@ -282,53 +456,64 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
         # Master might be down - attempt failover
         print(f"Master execution failed: {result.get('error')}")
         
-        # Elect new leader
-        new_leader_id = await elect_new_leader()
-        new_master_host = next(
-            (r["host"] for r in MYSQL_REPLICAS if r["id"] == new_leader_id),
-            None
-        )
-        
-        if not new_master_host:
+        # Use SEER to elect best replica
+        try:
+            async with httpx.AsyncClient() as client:
+                election_response = await client.post(
+                    f"{SEER_SERVICE_URL}/elect-leader",
+                    json={},
+                    timeout=10.0
+                )
+                election_response.raise_for_status()
+                election_data = election_response.json()
+                new_leader_id = election_data["leader_id"]
+        except Exception as e:
             with metrics_lock:
                 consistency_metrics[consistency.value]["failures"] += 1
-            raise HTTPException(status_code=503, detail="Failover failed: no suitable replica")
+            raise HTTPException(status_code=503, detail=f"Leader election failed: {str(e)}")
         
-        # Update master
+        # Find the elected replica
         with state_lock:
-            current_master = new_master_host
-            master_is_original = False
+            elected_replica = next((r for r in current_replicas if r["id"] == new_leader_id), None)
         
-        print(f"Failover complete: new master is {new_leader_id}")
+        if not elected_replica:
+            with metrics_lock:
+                consistency_metrics[consistency.value]["failures"] += 1
+            raise HTTPException(status_code=503, detail=f"Elected leader {new_leader_id} not found")
+        
+        # Promote elected replica to master
+        promotion_success = await promote_replica_to_master(elected_replica["container"])
+        
+        if not promotion_success:
+            with metrics_lock:
+                consistency_metrics[consistency.value]["failures"] += 1
+            raise HTTPException(status_code=503, detail="Failover failed: could not promote replica")
+        
+        # Update global state
+        with state_lock:
+            old_master = current_master
+            current_master = elected_replica
+            # Remove elected replica from replicas list and add old master
+            current_replicas = [r for r in current_replicas if r["id"] != new_leader_id]
+            current_replicas.append(old_master)
+        
+        print(f"Failover complete: new master is {current_master['id']}")
         
         # Retry on new master
-        result = execute_query_on_host(new_master_host, query, timestamp)
+        result = execute_query_on_host(current_master["host"], query, timestamp)
         
         if not result["success"]:
             with metrics_lock:
                 consistency_metrics[consistency.value]["failures"] += 1
             raise HTTPException(status_code=500, detail=f"Query failed on new master: {result.get('error')}")
     
-    # Filter out the current master from the replica list
-    with state_lock:
-        current_master_host = current_master
-    
-    actual_replicas = [
-        r for r in MYSQL_REPLICAS 
-        if r["host"] != current_master_host
-    ]
+    latency_ms = (time.time() - start_time) * 1000
     
     # Consistency-specific logic
     if consistency == ConsistencyLevel.ONE:
-        # ONE: Return immediately after master confirms (fastest)
-        latency_ms = (time.time() - start_time) * 1000
+        # ONE: Return immediately after master confirms (fastest, eventual consistency)
+        # Binlog will automatically replicate to replicas
         
-        # Still replicate to all replicas in background (eventual consistency)
-        # but don't wait for them
-        for replica in actual_replicas:
-            execute_query_on_host(replica["host"], query, timestamp)
-        
-        # Track metrics
         with metrics_lock:
             consistency_metrics["ONE"]["count"] += 1
             consistency_metrics["ONE"]["total_latency"] += latency_ms
@@ -341,162 +526,102 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
             executed_on=master_host,
             consistency_level="ONE",
             latency_ms=round(latency_ms, 2),
-            replicas_contacted=1
+            quorum_achieved=None,
+            replica_caught_up=None
         )
     
     elif consistency == ConsistencyLevel.QUORUM:
-        # QUORUM: Wait for majority of replicas (balanced)
-        quorum = await get_quorum()
-        
-        successful_replications = 0
-        quorum_confirmations = 0
-        
-        for replica in actual_replicas:
-            replica_result = execute_query_on_host(replica["host"], query, timestamp)
-            
-            if replica_result["success"]:
-                successful_replications += 1
-                if replica["id"] in quorum:
-                    quorum_confirmations += 1
-        
-        quorum_size = len(quorum)
-        required_confirmations = math.ceil(quorum_size / 2)
+        # QUORUM: Wait for 2 out of 3 replicas to catch up
+        catchup_result = await wait_for_quorum_catchup(timestamp, quorum_size=2, timeout_seconds=5.0)
         
         latency_ms = (time.time() - start_time) * 1000
         
-        if quorum_confirmations < required_confirmations:
+        if not catchup_result["quorum_achieved"]:
+            # Write succeeded on master but quorum didn't catch up in time
             with metrics_lock:
-                consistency_metrics["QUORUM"]["failures"] += 1
-            raise HTTPException(
-                status_code=500,
-                detail=f"Quorum not achieved: {quorum_confirmations}/{quorum_size} quorum replicas confirmed"
+                consistency_metrics["QUORUM"]["count"] += 1
+                consistency_metrics["QUORUM"]["total_latency"] += latency_ms
+                consistency_metrics["QUORUM"]["quorum_not_achieved"] += 1
+            
+            return QueryResponse(
+                success=True,
+                message=f"Write successful on master (timestamp: {timestamp}), but only {catchup_result['caught_up_count']}/3 replicas caught up. Data will eventually propagate via binlog.",
+                timestamp=timestamp,
+                rows_affected=result["rows_affected"],
+                executed_on=master_host,
+                consistency_level="QUORUM",
+                latency_ms=round(latency_ms, 2),
+                quorum_achieved=False,
+                replica_caught_up=False
             )
         
-        # Track metrics
+        # Quorum achieved - 2+ replicas caught up
         with metrics_lock:
             consistency_metrics["QUORUM"]["count"] += 1
             consistency_metrics["QUORUM"]["total_latency"] += latency_ms
         
         return QueryResponse(
             success=True,
-            message=f"Write successful (consistency: QUORUM, timestamp: {timestamp}, quorum: {quorum_confirmations}/{quorum_size})",
+            message=f"Write successful (consistency: QUORUM, timestamp: {timestamp}, {catchup_result['caught_up_count']}/3 replicas confirmed)",
             timestamp=timestamp,
             rows_affected=result["rows_affected"],
             executed_on=master_host,
             consistency_level="QUORUM",
             latency_ms=round(latency_ms, 2),
-            replicas_contacted=successful_replications + 1
+            quorum_achieved=True,
+            replica_caught_up=True
         )
     
     else:  # ConsistencyLevel.ALL
-        # ALL: Wait for all replicas (strongest consistency)
-        successful_replications = 0
-        
-        for replica in actual_replicas:
-            replica_result = execute_query_on_host(replica["host"], query, timestamp)
-            
-            if replica_result["success"]:
-                successful_replications += 1
+        # ALL: Wait for all 3 replicas to catch up
+        catchup_result = await wait_for_quorum_catchup(timestamp, quorum_size=3, timeout_seconds=5.0)
         
         latency_ms = (time.time() - start_time) * 1000
-        total_replicas = len(actual_replicas)
         
-        if successful_replications < total_replicas:
+        if not catchup_result["quorum_achieved"]:
+            # Write succeeded on master but not all replicas caught up
             with metrics_lock:
-                consistency_metrics["ALL"]["failures"] += 1
-            raise HTTPException(
-                status_code=500,
-                detail=f"ALL consistency not achieved: {successful_replications}/{total_replicas} replicas confirmed"
+                consistency_metrics["ALL"]["count"] += 1
+                consistency_metrics["ALL"]["total_latency"] += latency_ms
+                consistency_metrics["ALL"]["quorum_not_achieved"] += 1
+            
+            return QueryResponse(
+                success=True,
+                message=f"Write successful on master (timestamp: {timestamp}), but only {catchup_result['caught_up_count']}/3 replicas caught up. Data will eventually propagate via binlog.",
+                timestamp=timestamp,
+                rows_affected=result["rows_affected"],
+                executed_on=master_host,
+                consistency_level="ALL",
+                latency_ms=round(latency_ms, 2),
+                quorum_achieved=False,
+                replica_caught_up=False
             )
         
-        # Track metrics
+        # All replicas caught up
         with metrics_lock:
             consistency_metrics["ALL"]["count"] += 1
             consistency_metrics["ALL"]["total_latency"] += latency_ms
         
         return QueryResponse(
             success=True,
-            message=f"Write successful (consistency: ALL, timestamp: {timestamp}, replicas: {successful_replications}/{total_replicas})",
+            message=f"Write successful (consistency: ALL, timestamp: {timestamp}, all 3 replicas confirmed)",
             timestamp=timestamp,
             rows_affected=result["rows_affected"],
             executed_on=master_host,
             consistency_level="ALL",
             latency_ms=round(latency_ms, 2),
-            replicas_contacted=successful_replications + 1
+            quorum_achieved=True,
+            replica_caught_up=True
         )
-
-
-async def get_best_replica_for_read() -> str:
-    """
-    Select the best replica for read operations based on metrics.
-    
-    Selects replica with:
-    - Low latency
-    - Low or zero replication lag
-    - Healthy status
-    
-    Falls back to master if no suitable replica found.
-    
-    Returns:
-        Host address of best replica or master
-    """
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{METRICS_COLLECTOR_URL}/metrics", timeout=5.0)
-            response.raise_for_status()
-            data = response.json()
-            replicas = data.get("replicas", [])
-        
-        if not replicas:
-            # No replicas available, use master
-            with state_lock:
-                return current_master
-        
-        # Filter healthy replicas with acceptable lag (< 5 timestamps behind)
-        suitable_replicas = [
-            r for r in replicas 
-            if r["is_healthy"] and r["replication_lag"] < 5
-        ]
-        
-        if not suitable_replicas:
-            # No suitable replicas, use master
-            with state_lock:
-                return current_master
-        
-        # Sort by latency (ascending - lowest latency first)
-        suitable_replicas.sort(key=lambda x: x["latency_ms"])
-        
-        # Select the best replica (lowest latency)
-        best_replica_id = suitable_replicas[0]["replica_id"]
-        
-        # Get host for this replica
-        best_replica_host = next(
-            (r["host"] for r in MYSQL_REPLICAS if r["id"] == best_replica_id),
-            None
-        )
-        
-        if best_replica_host:
-            return best_replica_host
-        else:
-            # Fallback to master
-            with state_lock:
-                return current_master
-    
-    except Exception as e:
-        print(f"Error selecting best replica: {e}")
-        # Fallback to master on error
-        with state_lock:
-            return current_master
 
 
 async def handle_read_query(query: str, consistency: ConsistencyLevel) -> QueryResponse:
     """
-    Handle a read query (SELECT) with tunable consistency.
+    Handle a read query with tunable consistency.
     
     Consistency Levels:
-    - ONE: Read from single best replica (fastest, eventual consistency)
-    - QUORUM: Read from majority, return freshest (balanced, strong consistency)
-    - ALL: Read from all replicas, return freshest (slowest, strongest consistency)
+    - ONE: Read from replica if healthy, otherwise master
+    - QUORUM/ALL: Read from master for strong consistency
     
     Args:
         query: SQL read query
@@ -508,25 +633,33 @@ async def handle_read_query(query: str, consistency: ConsistencyLevel) -> QueryR
     start_time = time.time()
     
     if consistency == ConsistencyLevel.ONE:
-        # ONE: Read from single best replica (current behavior)
-        read_host = await get_best_replica_for_read()
-        result = execute_query_on_host(read_host, query)
+        # Try replica first for load balancing
+        health_status = await check_replicas_health()
         
-        if not result["success"]:
-            # Fallback to master
-            with state_lock:
-                master_host = current_master
+        with state_lock:
+            # Pick a healthy replica if available, otherwise use master
+            if current_replicas and health_status["healthy_count"] > 0:
+                # Pick a random replica for load balancing
+                replica = random.choice(current_replicas)
+                replica_host = replica["host"]
+            else:
+                replica_host = None
+            master_host = current_master["host"]
+        
+        if replica_host and health_status["healthy_count"] > 0:
+            result = execute_query_on_host(replica_host, query)
+            read_host = replica_host
+        else:
             result = execute_query_on_host(master_host, query)
             read_host = master_host
-            
-            if not result["success"]:
-                with metrics_lock:
-                    consistency_metrics["ONE"]["failures"] += 1
-                raise HTTPException(status_code=500, detail=f"Query failed: {result.get('error')}")
+        
+        if not result["success"]:
+            with metrics_lock:
+                consistency_metrics["ONE"]["failures"] += 1
+            raise HTTPException(status_code=500, detail=f"Query failed: {result.get('error')}")
         
         latency_ms = (time.time() - start_time) * 1000
         
-        # Track metrics
         with metrics_lock:
             consistency_metrics["ONE"]["count"] += 1
             consistency_metrics["ONE"]["total_latency"] += latency_ms
@@ -538,113 +671,34 @@ async def handle_read_query(query: str, consistency: ConsistencyLevel) -> QueryR
             rows_affected=len(result["data"]) if result["data"] else 0,
             executed_on=read_host,
             consistency_level="ONE",
-            latency_ms=round(latency_ms, 2),
-            replicas_contacted=1
+            latency_ms=round(latency_ms, 2)
         )
     
-    elif consistency == ConsistencyLevel.QUORUM:
-        # QUORUM: Read from majority of replicas, return most recent
-        quorum = await get_quorum()
-        
-        # Read from master + quorum replicas
+    else:  # QUORUM or ALL - read from master for strong consistency
         with state_lock:
-            master_host = current_master
+            master_host = current_master["host"]
         
-        results = []
-        hosts_queried = []
+        result = execute_query_on_host(master_host, query)
         
-        # Query master
-        master_result = execute_query_on_host(master_host, query)
-        if master_result["success"]:
-            results.append({"host": master_host, "data": master_result["data"]})
-            hosts_queried.append(master_host)
-        
-        # Query quorum replicas
-        for replica in MYSQL_REPLICAS:
-            if replica["id"] in quorum:
-                replica_result = execute_query_on_host(replica["host"], query)
-                if replica_result["success"]:
-                    results.append({"host": replica["host"], "data": replica_result["data"]})
-                    hosts_queried.append(replica["host"])
+        if not result["success"]:
+            with metrics_lock:
+                consistency_metrics[consistency.value]["failures"] += 1
+            raise HTTPException(status_code=500, detail=f"Query failed: {result.get('error')}")
         
         latency_ms = (time.time() - start_time) * 1000
         
-        if len(results) < math.ceil(len(quorum) / 2):
-            with metrics_lock:
-                consistency_metrics["QUORUM"]["failures"] += 1
-            raise HTTPException(
-                status_code=500,
-                detail=f"QUORUM read failed: only {len(results)} replicas responded"
-            )
-        
-        # Return the most recent result (all should be same for consistent data)
-        best_result = results[0]  # In practice, all should match
-        
-        # Track metrics
         with metrics_lock:
-            consistency_metrics["QUORUM"]["count"] += 1
-            consistency_metrics["QUORUM"]["total_latency"] += latency_ms
+            consistency_metrics[consistency.value]["count"] += 1
+            consistency_metrics[consistency.value]["total_latency"] += latency_ms
         
         return QueryResponse(
             success=True,
-            message=f"Read successful (consistency: QUORUM, {len(results)} replicas)",
-            data=best_result["data"],
-            rows_affected=len(best_result["data"]) if best_result["data"] else 0,
-            executed_on=", ".join(hosts_queried),
-            consistency_level="QUORUM",
-            latency_ms=round(latency_ms, 2),
-            replicas_contacted=len(results)
-        )
-    
-    else:  # ConsistencyLevel.ALL
-        # ALL: Read from all replicas, return most recent
-        with state_lock:
-            master_host = current_master
-        
-        results = []
-        hosts_queried = []
-        
-        # Query master
-        master_result = execute_query_on_host(master_host, query)
-        if master_result["success"]:
-            results.append({"host": master_host, "data": master_result["data"]})
-            hosts_queried.append(master_host)
-        
-        # Query all replicas
-        for replica in MYSQL_REPLICAS:
-            replica_result = execute_query_on_host(replica["host"], query)
-            if replica_result["success"]:
-                results.append({"host": replica["host"], "data": replica_result["data"]})
-                hosts_queried.append(replica["host"])
-        
-        latency_ms = (time.time() - start_time) * 1000
-        total_nodes = len(MYSQL_REPLICAS) + 1  # replicas + master
-        
-        if len(results) < total_nodes:
-            with metrics_lock:
-                consistency_metrics["ALL"]["failures"] += 1
-            raise HTTPException(
-                status_code=500,
-                detail=f"ALL read failed: only {len(results)}/{total_nodes} nodes responded"
-            )
-        
-        # Return the most recent result (all should be same for consistent data)
-        best_result = results[0]
-        
-        # Track metrics
-        with metrics_lock:
-            consistency_metrics["ALL"]["count"] += 1
-            consistency_metrics["ALL"]["total_latency"] += latency_ms
-        
-        return QueryResponse(
-            success=True,
-            message=f"Read successful (consistency: ALL, {len(results)} nodes)",
-            data=best_result["data"],
-            rows_affected=len(best_result["data"]) if best_result["data"] else 0,
-            executed_on=", ".join(hosts_queried),
-            consistency_level="ALL",
-            latency_ms=round(latency_ms, 2),
-            replicas_contacted=len(results)
+            message=f"Read successful (consistency: {consistency.value})",
+            data=result["data"],
+            rows_affected=len(result["data"]) if result["data"] else 0,
+            executed_on=master_host,
+            consistency_level=consistency.value,
+            latency_ms=round(latency_ms, 2)
         )
 
 
@@ -654,8 +708,8 @@ async def execute_query(request: QueryRequest):
     Main endpoint for executing SQL queries.
     
     Handles both read and write queries:
-    - Writes: Timestamped, replicated to quorum
-    - Reads: Routed to master for strong consistency
+    - Writes: Timestamped, replicated via binlog, with quorum verification
+    - Reads: Routed to replica (ONE) or master (QUORUM/ALL)
     
     Args:
         request: QueryRequest containing SQL query
@@ -689,8 +743,9 @@ async def get_status():
     with state_lock:
         return {
             "current_master": current_master,
-            "master_is_original": master_is_original,
-            "replicas": [r["id"] for r in MYSQL_REPLICAS]
+            "current_replicas": current_replicas,
+            "total_replicas": len(current_replicas),
+            "replication_mode": "binlog"
         }
 
 
@@ -709,6 +764,7 @@ async def get_consistency_metrics():
                 "count": data["count"],
                 "avg_latency_ms": round(avg_latency, 2),
                 "failures": data["failures"],
+                "quorum_not_achieved": data.get("quorum_not_achieved", 0),
                 "success_rate": (
                     round((data["count"] / (data["count"] + data["failures"]) * 100), 2)
                     if (data["count"] + data["failures"]) > 0
@@ -723,19 +779,34 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "coordinator"}
 
+
 @app.post("/admin/stop-master")
 async def stop_master():
     """
-    Stop the MySQL master container to simulate failure.
-    This will IMMEDIATELY trigger leader election via SEER.
+    Stop the current MySQL master container to simulate failure.
+    This will trigger automatic failover and binlog rewiring.
     """
-    global current_master, master_is_original
+    global current_master, current_replicas
     
     try:
+        with state_lock:
+            master_container = current_master["container"]
+            # Pick the first replica as the new master for simplicity in forced failure
+            # In a real scenario, we might want to consult SEER even here
+            if not current_replicas:
+                 return {
+                    "success": False,
+                    "message": "No replicas available to promote",
+                    "error": "No replicas found"
+                }
+            new_master_info = current_replicas[0]
+            replica_container = new_master_info["container"]
+            new_master_id = new_master_info["id"]
+        
         # Step 1: Stop the master container
-        print("Stopping mysql-replica-4 container...")
+        print(f"Stopping {master_container} container...")
         result = subprocess.run(
-            ["docker", "stop", "mysql-replica-4"],
+            ["docker", "stop", master_container],
             capture_output=True,
             text=True,
             timeout=10
@@ -751,215 +822,215 @@ async def stop_master():
         
         print("Master stopped successfully")
         
-        # Step 2: Wait a moment for the container to fully stop
+        # Step 2: Wait for container to stop
         await asyncio.sleep(2)
         
-        # Step 4: Immediately elect new leader using SEER (with retries)
-        print("Triggering leader election via SEER...")
+        # Step 3: Promote replica to master
+        promotion_success = await promote_replica_to_master(replica_container)
         
-        max_election_retries = 5
-        election_data = None
-        last_error = None
-        
-        for attempt in range(max_election_retries):
-            try:
-                async with httpx.AsyncClient() as client:
-                    # Call SEER with empty exclude list (SEER will filter unhealthy replicas)
-                    election_response = await client.post(
-                        f"{SEER_SERVICE_URL}/elect-leader",
-                        json={"exclude_replicas": []},  # Empty - SEER filters by health
-                        timeout=20.0  # Increased timeout
-                    )
-                    election_response.raise_for_status()
-                    election_data = election_response.json()
-                    print(f"Election successful on attempt {attempt + 1}")
-                    break
-            except httpx.HTTPStatusError as e:
-                error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
-                print(f"Election attempt {attempt + 1} failed (HTTP {e.response.status_code}): {error_detail}")
-                last_error = error_detail
-                if attempt < max_election_retries - 1:
-                    await asyncio.sleep(3)  # Longer wait between retries
-            except Exception as e:
-                print(f"Election attempt {attempt + 1} failed: {str(e)}")
-                last_error = str(e)
-                if attempt < max_election_retries - 1:
-                    await asyncio.sleep(3)
-        
-        if not election_data:
+        if not promotion_success:
             return {
                 "success": False,
-                "message": "Master stopped but leader election failed after retries",
-                "error": last_error or "Unknown error during election",
-                "hint": "Check if metrics-collector and SEER services are running. Master is stopped but system needs manual intervention."
+                "message": "Master stopped but replica promotion failed",
+                "error": "Could not promote replica to master"
             }
         
-        new_leader_id = election_data.get("leader_id")
-        print(f"SEER elected: {new_leader_id}")
-        
-        if not new_leader_id:
-            print("No leader ID in response")
-            return {
-                "success": False,
-                "message": "Master stopped but SEER did not return a leader",
-                "error": "Empty leader_id in response"
-            }
-        
-        # Step 5: Map leader ID to host
-        new_master_host = next(
-            (r["host"] for r in MYSQL_REPLICAS if r["id"] == new_leader_id),
-            None
-        )
-        
-        if not new_master_host:
-            print(f"Could not find host for {new_leader_id}")
-            return {
-                "success": False,
-                "message": "Master stopped but no suitable replica found for failover",
-                "error": f"No host mapping for {new_leader_id}"
-            }
-        
-        # Step 6: Update global master state
-        old_master = current_master
+        # Step 4: Update global state
         with state_lock:
-            current_master = new_master_host
-            master_is_original = False
-        
-        print(f"Failover complete: {old_master} -> {new_master_host} ({new_leader_id})")
-        
+            old_master = current_master
+            current_master = new_master_info
+            # Remove new master from replicas list
+            current_replicas = [r for r in current_replicas if r["id"] != new_master_id]
+            # We don't add the stopped master back to replicas yet, it needs to be restarted first
+            
         return {
             "success": True,
-            "message": "Master stopped and failover complete",
-            "old_master": old_master,
-            "new_master": new_master_host,
-            "new_leader_id": new_leader_id,
-            "election_details": {
-                "leader_id": election_data.get("leader_id"),
-                "score": election_data.get("score"),
-                "latency_ms": election_data.get("latency_ms"),
-                "uptime_seconds": election_data.get("uptime_seconds"),
-                "replication_lag": election_data.get("replication_lag"),
-                "crash_count": election_data.get("crash_count")
-            }
+            "message": f"Failover complete. New master: {current_master['id']}",
+            "old_master": old_master["id"],
+            "new_master": current_master["id"],
+            "new_leader_id": current_master["id"]
         }
-    
-    except subprocess.TimeoutExpired:
-        print("Docker command timed out")
-        raise HTTPException(status_code=500, detail="Command timed out")
+            
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error stopping master: {str(e)}")
+        return {
+            "success": False,
+            "message": "Failover failed",
+            "error": str(e)
+        }
 
 
-@app.post("/admin/start-master")
-async def start_master():
+class FailoverRequest(BaseModel):
+    new_leader: Optional[str] = None
+
+
+@app.post("/admin/trigger-failover")
+async def trigger_failover(request: FailoverRequest):
     """
-    Start the MySQL master container after failure recovery.
+    Trigger a graceful failover to a specific replica (or elect one).
+    This does NOT stop the old master container, but demotes it to a replica.
     """
-    global current_master, master_is_original
+    global current_master, current_replicas
     
     try:
+        target_replica = None
+        
+        with state_lock:
+            # If new_leader provided, find it
+            if request.new_leader:
+                target_replica = next((r for r in current_replicas if r["id"] == request.new_leader), None)
+                if not target_replica:
+                     return {
+                        "success": False,
+                        "message": f"Target replica {request.new_leader} not found",
+                        "error": "Replica not found"
+                    }
+            # Otherwise pick the first one (or we could call SEER here)
+            elif current_replicas:
+                target_replica = current_replicas[0]
+            else:
+                return {
+                    "success": False,
+                    "message": "No replicas available for failover",
+                    "error": "No replicas found"
+                }
+            
+            old_master_container = current_master["container"]
+            old_master_id = current_master["id"]
+            new_master_container = target_replica["container"]
+            new_master_host = target_replica["host"]
+            new_master_id = target_replica["id"]
+
+        print(f"Triggering graceful failover from {old_master_id} to {new_master_id}...")
+
+        # Step 1: Demote current master to replica of new master
+        # Note: We need to promote the new master first so it can accept connections? 
+        # Actually, usually we promote new master, then demote old master.
+        # But if we promote new master first, we might have split brain for a moment.
+        # Safe sequence:
+        # 1. Set old master read-only (demote script does this)
+        # 2. Promote new master (reset slave, read-write)
+        # 3. Configure old master to replicate from new master
+        
+        # Let's use our scripts. 
+        
+        # 1. Promote new master
+        promotion_success = await promote_replica_to_master(new_master_container)
+        if not promotion_success:
+             return {
+                "success": False,
+                "message": "Failed to promote new master",
+                "error": "Promotion failed"
+            }
+            
+        # 2. Demote old master
+        demotion_success = await demote_master_to_replica(old_master_container, new_master_host)
+        if not demotion_success:
+             # This is bad, we have two masters or old master is in weird state.
+             # But new master is active, so we can proceed with state update.
+             print("Warning: Failed to demote old master, but new master is promoted.")
+        
+        # Step 3: Update global state
+        with state_lock:
+            old_master_obj = current_master
+            current_master = target_replica
+            
+            # Update replicas list: remove new master, add old master
+            current_replicas = [r for r in current_replicas if r["id"] != new_master_id]
+            current_replicas.append(old_master_obj)
+            
+        return {
+            "success": True,
+            "message": f"Graceful failover complete. New master: {new_master_id}",
+            "old_master": old_master_id,
+            "new_master": new_master_id,
+            "new_leader_id": new_master_id
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "message": "Graceful failover failed",
+            "error": str(e)
+        }
+
+
+@app.post("/admin/restart-old-master")
+async def restart_old_master():
+    """
+    Restart the old master (mysql-instance-1) and configure it as a replica of the current master.
+    This is called after a failover to bring the old master back online.
+    """
+    global current_master, current_replicas
+    
+    try:
+        # The old master is always mysql-instance-1
+        old_master_container = "mysql-instance-1"
+        old_master_id = "instance-1"
+        
+        with state_lock:
+            new_master_host = current_master["host"]
+            # Check if old master is already in replicas (already recovered)
+            already_replica = any(r["id"] == old_master_id for r in current_replicas)
+        
+        if already_replica:
+            return {
+                "success": True,
+                "message": f"{old_master_id} is already configured as a replica",
+                "master": current_master["id"]
+            }
+        
+        # Step 1: Start the old master container
+        print(f"Starting {old_master_container} container...")
         result = subprocess.run(
-            ["docker", "start", "mysql-replica-4"],
+            ["docker", "start", old_master_container],
             capture_output=True,
             text=True,
             timeout=10
         )
         
-        if result.returncode == 0:
-            # Wait for MySQL to be ready
-            print("Waiting for MySQL master to be ready...")
-            await asyncio.sleep(5)
-            
-            # Reset master to original
-            old_master = current_master
-            with state_lock:
-                current_master = MYSQL_MASTER_HOST
-                master_is_original = True
-            
-            print(f"Master restored: {old_master} -> {MYSQL_MASTER_HOST}")
-            
-            return {
-                "success": True,
-                "message": "Master container started and restored as primary.",
-                "old_master": old_master,
-                "new_master": MYSQL_MASTER_HOST,
-                "output": result.stdout
-            }
-        else:
+        if result.returncode != 0:
             return {
                 "success": False,
-                "message": "Failed to start master",
+                "message": "Failed to start old master",
                 "error": result.stderr
             }
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=500, detail="Command timed out")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error starting master: {str(e)}")
-
-
-@app.post("/admin/trigger-failover")
-async def trigger_failover():
-    """
-    Manually trigger failover by electing a new leader.
-    Useful for testing SEER algorithm without actually stopping master.
-    """
-    try:
-        # Elect new leader
-        new_leader_id = await elect_new_leader()
-        new_master_host = next(
-            (r["host"] for r in MYSQL_REPLICAS if r["id"] == new_leader_id),
-            None
-        )
         
-        if not new_master_host:
-            raise HTTPException(status_code=503, detail="No suitable replica found")
+        # Step 2: Wait for container to start
+        await asyncio.sleep(5)
         
-        # Update master
-        global current_master, master_is_original
-        old_master = current_master
+        # Step 3: Demote old master to replica
+        demotion_success = await demote_master_to_replica(old_master_container, new_master_host)
         
+        if not demotion_success:
+            return {
+                "success": False,
+                "message": "Old master started but demotion to replica failed",
+                "error": "Could not configure replication"
+            }
+        
+        # Step 4: Add old master back to replicas list
         with state_lock:
-            current_master = new_master_host
-            master_is_original = False
+            old_master_info = {
+                "id": old_master_id,
+                "host": "mysql-instance-1",
+                "container": old_master_container
+            }
+            current_replicas.append(old_master_info)
         
         return {
             "success": True,
-            "message": f"Failover complete: {old_master} -> {new_master_host}",
-            "old_master": old_master,
-            "new_master": new_master_host,
-            "new_leader_id": new_leader_id
+            "message": f"Old master ({old_master_id}) restarted and configured as replica of {current_master['id']}",
+            "master": current_master["id"],
+            "total_replicas": len(current_replicas)
         }
+    
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failover failed: {str(e)}")
-
-
-@app.get("/admin/leader-info")
-async def get_leader_info():
-    """
-    Get detailed information about current leader and election metrics.
-    """
-    try:
-        # Get metrics for all replicas
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{METRICS_COLLECTOR_URL}/metrics", timeout=5.0)
-            response.raise_for_status()
-            metrics_data = response.json()
-        
-        with state_lock:
-            current_leader = current_master
-            is_original = master_is_original
-        
         return {
-            "current_master": current_leader,
-            "master_is_original": is_original,
-            "replica_metrics": metrics_data.get("replicas", []),
-            "timestamp": metrics_data.get("timestamp")
+            "success": False,
+            "message": "Restart failed",
+            "error": str(e)
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get leader info: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn

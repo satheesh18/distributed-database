@@ -90,7 +90,7 @@ docker-compose logs -f coordinator
 ### Write Query
 
 ```bash
-curl -X POST http://localhost:8000/query \
+curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
   -d '{"query": "INSERT INTO users (name, email) VALUES (\"Alice\", \"alice@example.com\")"}'
 ```
@@ -111,7 +111,7 @@ Response:
 ### Read Query
 
 ```bash
-curl -X POST http://localhost:8000/query \
+curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
   -d '{"query": "SELECT * FROM users"}'
 ```
@@ -138,7 +138,7 @@ Response:
 ### Check System Status
 
 ```bash
-curl http://localhost:8000/status
+curl http://localhost:9000/status
 ```
 
 Response:
@@ -201,12 +201,12 @@ Response:
 
 ```bash
 # Insert data
-curl -X POST http://localhost:8000/query \
+curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
   -d '{"query": "INSERT INTO users (name, email) VALUES (\"Bob\", \"bob@example.com\")"}'
 
 # Read data
-curl -X POST http://localhost:8000/query \
+curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
   -d '{"query": "SELECT * FROM users"}'
 ```
@@ -221,22 +221,22 @@ docker-compose stop mysql-replica-4
 sleep 5
 
 # Try a write (should trigger failover)
-curl -X POST http://localhost:8000/query \
+curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
   -d '{"query": "INSERT INTO users (name, email) VALUES (\"Charlie\", \"charlie@example.com\")"}'
 
 # Check new master
-curl http://localhost:8000/status
+curl http://localhost:9000/status
 ```
 
 ### 3. Check Metrics
 
 ```bash
 # View all replica metrics
-curl http://localhost:8003/metrics
+curl http://localhost:9003/metrics
 
 # View specific replica
-curl http://localhost:8003/metrics/replica-1
+curl http://localhost:9003/metrics/replica-1
 ```
 
 ### 4. Test Quorum Selection
@@ -252,7 +252,7 @@ curl -X POST http://localhost:8004/select-quorum \
 
 ```bash
 # Trigger leader election
-curl -X POST http://localhost:8005/elect-leader \
+curl -X POST http://localhost:9005/elect-leader \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
@@ -300,7 +300,7 @@ docker-compose up -d
 
 ### Quorum failures
 
-- Check replica health: `curl http://localhost:8003/metrics`
+- Check replica health: `curl http://localhost:9003/metrics`
 - Verify at least 2 replicas are healthy
 - Check Cabinet service: `curl http://localhost:8004/health`
 

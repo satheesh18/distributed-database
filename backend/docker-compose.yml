@@ -1,10 +1,10 @@
 version: '3.8'
 
 services:
-  # MySQL Master (renamed to mysql-replica-4)
-  mysql-replica-4:
+  # MySQL Master Instance
+  mysql-instance-1:
     image: mysql:8.0
-    container_name: mysql-replica-4
+    container_name: mysql-instance-1
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
@@ -21,60 +21,71 @@ services:
       timeout: 3s
       retries: 5
 
-  # MySQL Replica 1
-  mysql-replica-1:
+  # MySQL Replica Instance 2
+  mysql-instance-2:
     image: mysql:8.0
-    container_name: mysql-replica-1
+    container_name: mysql-instance-2
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
     volumes:
       - ./mysql-config/replica.cnf:/etc/mysql/conf.d/custom.cnf
-      - ./mysql-config/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./mysql-config/init-replication.sh:/docker-entrypoint-initdb.d/99-init-replication.sh
     ports:
       - "3307:3306"
     networks:
       - db-network
+    depends_on:
+      mysql-instance-1:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
       interval: 5s
       timeout: 3s
       retries: 5
 
-  # MySQL Replica 2
-  mysql-replica-2:
+  # MySQL Replica Instance 3
+  mysql-instance-3:
     image: mysql:8.0
-    container_name: mysql-replica-2
+    container_name: mysql-instance-3
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
+      SERVER_ID: 3
     volumes:
       - ./mysql-config/replica.cnf:/etc/mysql/conf.d/custom.cnf
-      - ./mysql-config/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./mysql-config/init-replication.sh:/docker-entrypoint-initdb.d/99-init-replication.sh
     ports:
       - "3308:3306"
     networks:
       - db-network
+    depends_on:
+      mysql-instance-1:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
       interval: 5s
       timeout: 3s
       retries: 5
 
-  # MySQL Replica 3
-  mysql-replica-3:
+  # MySQL Replica Instance 4
+  mysql-instance-4:
     image: mysql:8.0
-    container_name: mysql-replica-3
+    container_name: mysql-instance-4
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
+      SERVER_ID: 4
     volumes:
       - ./mysql-config/replica.cnf:/etc/mysql/conf.d/custom.cnf
-      - ./mysql-config/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./mysql-config/init-replication.sh:/docker-entrypoint-initdb.d/99-init-replication.sh
     ports:
       - "3309:3306"
     networks:
       - db-network
+    depends_on:
+      mysql-instance-1:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
       interval: 5s
@@ -89,7 +100,7 @@ services:
       - SERVER_ID=1
       - START_VALUE=1
     ports:
-      - "8001:8000"
+      - "9001:8000"
     networks:
       - db-network
 
@@ -101,7 +112,7 @@ services:
       - SERVER_ID=2
       - START_VALUE=2
     ports:
-      - "8002:8000"
+      - "9002:8000"
     networks:
       - db-network
 
@@ -110,23 +121,23 @@ services:
     build: ./metrics-collector
     container_name: metrics-collector
     environment:
-      - MYSQL_MASTER_HOST=mysql-replica-4
-      - MYSQL_REPLICA_1_HOST=mysql-replica-1
-      - MYSQL_REPLICA_2_HOST=mysql-replica-2
-      - MYSQL_REPLICA_3_HOST=mysql-replica-3
+      - MYSQL_MASTER_HOST=mysql-instance-1
+      - MYSQL_REPLICA_2_HOST=mysql-instance-2
+      - MYSQL_REPLICA_3_HOST=mysql-instance-3
+      - MYSQL_REPLICA_4_HOST=mysql-instance-4
       - MYSQL_PASSWORD=rootpass
     ports:
-      - "8003:8000"
+      - "9003:8000"
     networks:
       - db-network
     depends_on:
-      mysql-replica-4:
+      mysql-instance-1:
         condition: service_healthy
-      mysql-replica-1:
+      mysql-instance-2:
         condition: service_healthy
-      mysql-replica-2:
+      mysql-instance-3:
         condition: service_healthy
-      mysql-replica-3:
+      mysql-instance-4:
         condition: service_healthy
 
   # Cabinet Service (Adaptive Quorum)
@@ -136,7 +147,7 @@ services:
     environment:
       - METRICS_COLLECTOR_URL=http://metrics-collector:8000
     ports:
-      - "8004:8000"
+      - "9004:8000"
     networks:
       - db-network
     depends_on:
@@ -149,7 +160,7 @@ services:
     environment:
       - METRICS_COLLECTOR_URL=http://metrics-collector:8000
     ports:
-      - "8005:8000"
+      - "9005:8000"
     networks:
       - db-network
     depends_on:
@@ -162,10 +173,10 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock  # Mount Docker socket for container control
     environment:
-      - MYSQL_MASTER_HOST=mysql-replica-4
-      - MYSQL_REPLICA_1_HOST=mysql-replica-1
-      - MYSQL_REPLICA_2_HOST=mysql-replica-2
-      - MYSQL_REPLICA_3_HOST=mysql-replica-3
+      - MYSQL_MASTER_HOST=mysql-instance-1
+      - MYSQL_REPLICA_2_HOST=mysql-instance-2
+      - MYSQL_REPLICA_3_HOST=mysql-instance-3
+      - MYSQL_REPLICA_4_HOST=mysql-instance-4
       - MYSQL_PASSWORD=rootpass
       - TIMESTAMP_SERVICE_1_URL=http://timestamp-service-1:8000
       - TIMESTAMP_SERVICE_2_URL=http://timestamp-service-2:8000
@@ -173,17 +184,17 @@ services:
       - SEER_SERVICE_URL=http://seer-service:8000
       - METRICS_COLLECTOR_URL=http://metrics-collector:8000
     ports:
-      - "8000:8000"
+      - "9000:8000"
     networks:
       - db-network
     depends_on:
-      mysql-replica-4:
+      mysql-instance-1:
         condition: service_healthy
-      mysql-replica-1:
+      mysql-instance-2:
         condition: service_healthy
-      mysql-replica-2:
+      mysql-instance-3:
         condition: service_healthy
-      mysql-replica-3:
+      mysql-instance-4:
         condition: service_healthy
       timestamp-service-1:
         condition: service_started

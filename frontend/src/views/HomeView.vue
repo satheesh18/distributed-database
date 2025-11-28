@@ -33,6 +33,12 @@
 
     <!-- Metrics -->
     <Panel header="Replica Metrics" class="mb-4">
+      <div class="metric-card mb-3">
+        <div class="metric-label">Master Timestamp</div>
+        <div class="metric-value">
+          <Tag severity="info">{{ masterTimestamp }}</Tag>
+        </div>
+      </div>
       <DataTable :value="metrics" :loading="loadingMetrics">
         <Column field="replica_id" header="Replica ID"></Column>
         <Column field="latency_ms" header="Latency (ms)">
@@ -40,11 +46,16 @@
             {{ slotProps.data.latency_ms.toFixed(2) }}
           </template>
         </Column>
-        <Column field="replication_lag" header="Replication Lag">
+        <Column field="replication_lag" header="Timestamp Lag">
           <template #body="slotProps">
-            <Tag :severity="slotProps.data.replication_lag === 0 ? 'success' : 'warning'">
-              {{ slotProps.data.replication_lag }}
+            <Tag :severity="slotProps.data.replication_lag === 0 ? 'success' : slotProps.data.replication_lag < 5 ? 'warning' : 'danger'">
+              {{ slotProps.data.replication_lag }} behind
             </Tag>
+          </template>
+        </Column>
+        <Column header="Replica Timestamp">
+          <template #body="slotProps">
+            {{ masterTimestamp - slotProps.data.replication_lag }}
           </template>
         </Column>
         <Column field="uptime_seconds" header="Uptime (s)">
@@ -158,12 +169,6 @@
             @click="getQuorum"
             severity="info"
           />
-          <Button 
-            label="Elect Leader" 
-            icon="pi pi-star" 
-            @click="electLeader"
-            severity="help"
-          />
         </div>
 
         <!-- Execution Flow -->
@@ -192,26 +197,48 @@
       </div>
     </Panel>
 
-    <!-- Danger Zone -->
-    <Panel header="⚠️ Danger Zone" class="mb-4">
+    <!-- Failover Testing -->
+    <Panel header="🔄 Failover Testing" class="mb-4">
       <div class="danger-zone">
-        <h4>Master Failover Testing</h4>
-        <p class="text-sm mb-3">Stop the master database to trigger automatic leader election using SEER algorithm</p>
+        <h4>Master Failover (Binlog-Based with 3 Replicas)</h4>
+        <p class="text-sm mb-3">Test failover scenarios. SEER will elect the best replica based on latency, lag, and stability.</p>
         <div class="action-buttons">
           <Button 
-            label="Stop Master" 
+            label="Stop Master (Crash + Recovery)" 
             icon="pi pi-power-off" 
             @click="stopMaster"
             severity="danger"
-            :disabled="!masterRunning"
+            :loading="failoverInProgress"
           />
           <Button 
-            label="Start Master" 
-            icon="pi pi-play" 
-            @click="startMaster"
-            severity="success"
-            :disabled="masterRunning"
+            label="Elect New Leader (Graceful)" 
+            icon="pi pi-star" 
+            @click="electLeaderOnly"
+            severity="warning"
+            :loading="electionInProgress"
           />
+        </div>
+        <p v-if="failoverInProgress" class="text-sm mt-2" style="color: orange;">
+          ⏳ Stopping master and recovering... {{ recoveryCountdown > 0 ? `(${recoveryCountdown}s)` : '' }}
+        </p>
+        
+        <!-- Failover Execution Flow -->
+        <div v-if="failoverFlow.length > 0" class="execution-flow mt-3">
+          <h4 class="mb-3">Failover Progress</h4>
+          <div v-for="(step, index) in failoverFlow" :key="index" class="flow-step">
+            <div class="flow-step-number">{{ index + 1 }}</div>
+            <div class="flow-step-content">
+              <div class="flow-step-title">{{ step.title }}</div>
+              <div class="flow-step-detail">{{ step.detail }}</div>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Failover Result -->
+        <div v-if="failoverResult" class="mt-3">
+          <Message :severity="failoverResult.success ? 'success' : 'error'" :closable="false">
+            {{ failoverResult.message }}
+          </Message>
         </div>
       </div>
     </Panel>
@@ -220,13 +247,29 @@
     <Panel header="System Status" class="mb-4">
       <div class="metric-card">
         <div class="metric-label">Current Master</div>
-        <div class="metric-value">{{ systemStatus.current_master || 'Loading...' }}</div>
+        <div class="metric-value">{{ systemStatus.current_master?.id || 'Loading...' }} ({{ systemStatus.current_master?.host || '' }})</div>
       </div>
       <div class="metric-card mt-2">
-        <div class="metric-label">Master is Original</div>
+        <div class="metric-label">Current Replicas ({{ systemStatus.total_replicas || 0 }})</div>
         <div class="metric-value">
-          <Tag :severity="systemStatus.master_is_original ? 'success' : 'warning'">
-            {{ systemStatus.master_is_original ? 'Yes' : 'No (Failover Occurred)' }}
+          <div v-for="replica in systemStatus.current_replicas" :key="replica.id" class="text-sm">
+            {{ replica.id }} ({{ replica.host }})
+          </div>
+        </div>
+      </div>
+      <div class="metric-card mt-2">
+        <div class="metric-label">Replication Mode</div>
+        <div class="metric-value">
+          <Tag severity="info">
+            {{ systemStatus.replication_mode || 'binlog' }} (MySQL Native)
+          </Tag>
+        </div>
+      </div>
+      <div class="metric-card mt-2">
+        <div class="metric-label">Quorum Size</div>
+        <div class="metric-value">
+          <Tag severity="success">
+            2 out of {{ systemStatus.total_replicas || 3 }} replicas
           </Tag>
         </div>
       </div>
@@ -237,30 +280,36 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = 'http://localhost:9000'
 
 // State
 const services = ref([
-  { name: 'Coordinator', port: 8000, healthy: false, role: 'API Gateway' },
-  { name: 'MySQL Master', port: 3306, healthy: false, role: 'Primary DB' },
-  { name: 'MySQL Replica 1', port: 3307, healthy: false, role: 'Replica' },
-  { name: 'MySQL Replica 2', port: 3308, healthy: false, role: 'Replica' },
-  { name: 'MySQL Replica 3', port: 3309, healthy: false, role: 'Replica' },
-  { name: 'Timestamp Service 1', port: 8001, healthy: false, role: 'Odd Timestamps' },
-  { name: 'Timestamp Service 2', port: 8002, healthy: false, role: 'Even Timestamps' },
-  { name: 'Metrics Collector', port: 8003, healthy: false, role: 'Monitoring' },
-  { name: 'Cabinet Service', port: 8004, healthy: false, role: 'Quorum Selection' },
-  { name: 'SEER Service', port: 8005, healthy: false, role: 'Leader Election' },
+  { name: 'Coordinator', port: 9000, healthy: false, role: 'API Gateway' },
+  { name: 'MySQL Instance 1', port: 3306, healthy: false, role: 'Master (Binlog Source)' },
+  { name: 'MySQL Instance 2', port: 3307, healthy: false, role: 'Replica (Binlog Consumer)' },
+  { name: 'MySQL Instance 3', port: 3308, healthy: false, role: 'Replica (Binlog Consumer)' },
+  { name: 'MySQL Instance 4', port: 3309, healthy: false, role: 'Replica (Binlog Consumer)' },
+  { name: 'Timestamp Service 1', port: 9001, healthy: false, role: 'Odd Timestamps' },
+  { name: 'Timestamp Service 2', port: 9002, healthy: false, role: 'Even Timestamps' },
+  { name: 'Metrics Collector', port: 9003, healthy: false, role: 'Monitoring' },
+  { name: 'Cabinet Service', port: 9004, healthy: false, role: 'Quorum Selection' },
+  { name: 'SEER Service', port: 9005, healthy: false, role: 'Leader Election' },
 ])
 
 const metrics = ref<any[]>([])
+const masterTimestamp = ref<number>(0)
 const loadingMetrics = ref(false)
 const query = ref('SELECT * FROM users')
 const executing = ref(false)
 const executionFlow = ref<any[]>([])
+const failoverFlow = ref<any[]>([])
 const queryResult = ref<any>(null)
 const systemStatus = ref<any>({})
 const masterRunning = ref(true)
+const failoverInProgress = ref(false)
+const electionInProgress = ref(false)
+const recoveryCountdown = ref(0)
+const failoverResult = ref<any>(null)
 const consistencyLevel = ref('QUORUM')
 const consistencyMetrics = ref<any>({})
 const consistencyMetricsArray = ref<any[]>([])
@@ -278,24 +327,34 @@ let refreshInterval: any = null
 const checkServiceHealth = async () => {
   const healthChecks = [
     { index: 0, url: `${API_BASE}/health` },
-    { index: 7, url: 'http://localhost:8003/health' },
-    { index: 8, url: 'http://localhost:8004/health' },
-    { index: 9, url: 'http://localhost:8005/health' },
+    { index: 7, url: 'http://localhost:9003/health' },
+    { index: 8, url: 'http://localhost:9004/health' },
+    { index: 9, url: 'http://localhost:9005/health' },
   ]
 
   for (const check of healthChecks) {
     try {
       const response = await fetch(check.url)
-      services.value[check.index].healthy = response.ok
+      const service = services.value[check.index]
+      if (service) {
+        service.healthy = response.ok
+      }
     } catch {
-      services.value[check.index].healthy = false
+      const service = services.value[check.index]
+      if (service) {
+        service.healthy = false
+      }
     }
   }
 
   // Assume MySQL and timestamp services are healthy if coordinator is healthy
-  if (services.value[0].healthy) {
+  const coordinator = services.value[0]
+  if (coordinator?.healthy) {
     for (let i = 1; i <= 6; i++) {
-      services.value[i].healthy = true
+      const service = services.value[i]
+      if (service) {
+        service.healthy = true
+      }
     }
   }
 }
@@ -303,9 +362,10 @@ const checkServiceHealth = async () => {
 const fetchMetrics = async () => {
   loadingMetrics.value = true
   try {
-    const response = await fetch('http://localhost:8003/metrics')
+    const response = await fetch('http://localhost:9003/metrics')
     const data = await response.json()
     metrics.value = data.replicas
+    masterTimestamp.value = data.master_timestamp
   } catch (error) {
     console.error('Failed to fetch metrics:', error)
   } finally {
@@ -317,7 +377,8 @@ const fetchSystemStatus = async () => {
   try {
     const response = await fetch(`${API_BASE}/status`)
     systemStatus.value = await response.json()
-    masterRunning.value = systemStatus.value.current_master === 'mysql-replica-4'
+    // Check if current master is instance-1 (original master)
+    masterRunning.value = systemStatus.value.current_master?.id === 'instance-1'
   } catch (error) {
     console.error('Failed to fetch system status:', error)
   }
@@ -427,7 +488,7 @@ const executeQuery = async () => {
 
 const insertSampleData = () => {
   const names = ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve']
-  const name = names[Math.floor(Math.random() * names.length)]
+  const name = names[Math.floor(Math.random() * names.length)] || 'User'
   const email = `${name.toLowerCase()}@example.com`
   query.value = `INSERT INTO users (name, email) VALUES ("${name}", "${email}")`
   executeQuery()
@@ -436,7 +497,7 @@ const insertSampleData = () => {
 const getQuorum = async () => {
   executionFlow.value = []
   try {
-    const response = await fetch('http://localhost:8004/select-quorum', {
+    const response = await fetch('http://localhost:9004/select-quorum', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ operation: 'write' })
@@ -477,7 +538,7 @@ const electLeader = async () => {
       detail: 'Analyzing replicas to select optimal leader...'
     })
     
-    const seerResponse = await fetch('http://localhost:8005/elect-leader', {
+    const seerResponse = await fetch('http://localhost:9005/elect-leader', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({})
@@ -539,15 +600,82 @@ const electLeader = async () => {
     executing.value = false
   }
 }
-const stopMaster = async () => {
-  executing.value = true
-  executionFlow.value = []
-  queryResult.value = null
+
+const electLeaderOnly = async () => {
+  failoverFlow.value = []
+  electionInProgress.value = true
+  failoverResult.value = null
   
   try {
-    executionFlow.value.push({
+    failoverFlow.value.push({
+      title: 'Calling SEER Algorithm',
+      detail: 'Analyzing replicas to select optimal leader...'
+    })
+    
+    const seerResponse = await fetch('http://localhost:9005/elect-leader', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    })
+    const seerData = await seerResponse.json()
+    
+    failoverFlow.value.push({
+      title: 'SEER Algorithm Executed',
+      detail: `Elected leader: ${seerData.leader_id} (Score: ${seerData.score.toFixed(3)})`
+    })
+
+    failoverFlow.value.push({
+      title: 'Promoting New Leader',
+      detail: `${seerData.leader_id} → Master, Current master → Replica`
+    })
+    
+    const failoverResponse = await fetch(`${API_BASE}/admin/trigger-failover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_leader: seerData.leader_id })
+    })
+    
+    const failoverData = await failoverResponse.json()
+    
+    if (failoverData.success) {
+      failoverFlow.value.push({
+        title: 'Failover Complete',
+        detail: `${failoverData.old_master} → ${failoverData.new_master}`
+      })
+      
+      failoverResult.value = {
+        success: true,
+        message: `Graceful failover complete! New master: ${failoverData.new_master}`
+      }
+    } else {
+      failoverResult.value = {
+        success: false,
+        message: `Failover failed: ${failoverData.error || failoverData.message}`
+      }
+    }
+    
+    setTimeout(async () => {
+      await fetchSystemStatus()
+      await fetchMetrics()
+    }, 1500)
+  } catch (error: any) {
+    failoverResult.value = {
+      success: false,
+      message: `Error: ${error.message}`
+    }
+  } finally {
+    electionInProgress.value = false
+  }
+}
+const stopMaster = async () => {
+  failoverInProgress.value = true
+  failoverFlow.value = []
+  failoverResult.value = null
+  
+  try {
+    failoverFlow.value.push({
       title: 'Stopping Master Container',
-      detail: 'Executing: docker stop mysql-replica-4'
+      detail: 'Executing: docker stop mysql-instance-1'
     })
     
     const response = await fetch(`${API_BASE}/admin/stop-master`, {
@@ -558,28 +686,28 @@ const stopMaster = async () => {
     const result = await response.json()
     
     if (result.success) {
-      executionFlow.value.push({
+      failoverFlow.value.push({
         title: 'Master Stopped',
         detail: 'Master container is now down'
       })
       
       if (result.new_leader_id) {
-        executionFlow.value.push({
+        failoverFlow.value.push({
           title: 'Leader Elected',
           detail: `New leader: ${result.new_leader_id} (${result.new_master})`
         })
         
         if (result.election_details) {
-          executionFlow.value.push({
+          failoverFlow.value.push({
             title: 'Election Details',
             detail: `Score: ${result.election_details.score?.toFixed(3)}, Latency: ${result.election_details.latency_ms?.toFixed(2)}ms, Lag: ${result.election_details.replication_lag}`
           })
         }
       }
       
-      queryResult.value = {
+      failoverResult.value = {
         success: true,
-        message: result.message || 'Master stopped and failover complete!'
+        message: result.message || 'Master stopped and failover complete! Auto-recovery starting...'
       }
       
       masterRunning.value = false
@@ -589,36 +717,108 @@ const stopMaster = async () => {
         await fetchSystemStatus()
         await fetchMetrics()
       }, 2000)
+      
+      // Start auto-recovery countdown and process
+      startAutoRecovery()
     } else {
-      executionFlow.value.push({
+      failoverFlow.value.push({
         title: 'Failover Failed',
         detail: result.error || result.message || 'Unknown error'
       })
       
       if (result.hint) {
-        executionFlow.value.push({
+        failoverFlow.value.push({
           title: 'Hint',
           detail: result.hint
         })
       }
       
-      queryResult.value = {
+      failoverResult.value = {
         success: false,
         message: `${result.message || 'Failed to stop master'}\n${result.hint || ''}`
       }
+      failoverInProgress.value = false
     }
   } catch (error: any) {
-    executionFlow.value.push({
+    failoverFlow.value.push({
       title: 'Request Failed',
       detail: error.message
     })
     
-    queryResult.value = {
+    failoverResult.value = {
       success: false,
       message: `Error: ${error.message}`
     }
+    failoverInProgress.value = false
+  }
+}
+
+const startAutoRecovery = () => {
+  recoveryCountdown.value = 10
+  
+  const countdownInterval = setInterval(() => {
+    recoveryCountdown.value--
+    if (recoveryCountdown.value <= 0) {
+      clearInterval(countdownInterval)
+      performAutoRecovery()
+    }
+  }, 1000)
+}
+
+const performAutoRecovery = async () => {
+  failoverFlow.value.push({
+    title: 'Auto-Recovery Started',
+    detail: 'Restarting old master as replica...'
+  })
+  
+  try {
+    const response = await fetch(`${API_BASE}/admin/restart-old-master`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    
+    const result = await response.json()
+    
+    if (result.success) {
+      failoverFlow.value.push({
+        title: 'Auto-Recovery Complete',
+        detail: 'Old master restarted and configured as replica'
+      })
+      
+      failoverResult.value = {
+        success: true,
+        message: 'Failover and auto-recovery complete! Old master is now a replica.'
+      }
+    } else {
+      failoverFlow.value.push({
+        title: 'Auto-Recovery Failed',
+        detail: result.error || 'Use Manual Recovery button'
+      })
+      
+      failoverResult.value = {
+        success: false,
+        message: `Auto-recovery failed: ${result.error || result.message}. Try Manual Recovery.`
+      }
+    }
+  } catch (error: any) {
+    failoverFlow.value.push({
+      title: 'Auto-Recovery Failed',
+      detail: error.message
+    })
+    
+    failoverResult.value = {
+      success: false,
+      message: `Auto-recovery failed: ${error.message}. Try Manual Recovery.`
+    }
   } finally {
-    executing.value = false
+    failoverInProgress.value = false
+    masterRunning.value = true
+    
+    // Refresh status
+    setTimeout(async () => {
+      await fetchSystemStatus()
+      await fetchMetrics()
+    }, 3000)
   }
 }
 
@@ -629,11 +829,11 @@ const startMaster = async () => {
   
   try {
     executionFlow.value.push({
-      title: 'Starting Master Container',
-      detail: 'Executing: docker-compose start mysql-replica-4'
+      title: 'Restarting Old Master as Replica',
+      detail: 'Starting mysql-instance-1 and configuring binlog replication'
     })
     
-    const response = await fetch(`${API_BASE}/admin/start-master`, {
+    const response = await fetch(`${API_BASE}/admin/restart-old-master`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' }
     })
@@ -642,13 +842,13 @@ const startMaster = async () => {
     
     if (result.success) {
       executionFlow.value.push({
-        title: 'Master Started',
-        detail: 'Master container is running. System restored to original configuration.'
+        title: 'Old Master Restarted',
+        detail: 'Container started and configured as replica. Binlog replication active.'
       })
       
       queryResult.value = {
         success: true,
-        message: 'Master started successfully. System back to normal.'
+        message: result.message || 'Old master restarted as replica successfully.'
       }
       
       masterRunning.value = true
@@ -661,10 +861,10 @@ const startMaster = async () => {
     } else {
       queryResult.value = {
         success: false,
-        message: `Failed to start master: ${result.error || result.message}`
+        message: `Failed to restart old master: ${result.error || result.message}`
       }
     }
-  } catch (error) {
+  } catch (error: any) {
     queryResult.value = {
       success: false,
       message: `Error: ${error.message}`
@@ -720,10 +920,10 @@ const triggerFailover = async () => {
         message: result.message
       }
     }
-  } catch (error) {
+  } catch (error: any) {
     queryResult.value = {
       success: false,
-      message: `Error: ${error.message}`
+      message: `Error: ${error?.message || 'Unknown error'}`
     }
   } finally {
     executing.value = false

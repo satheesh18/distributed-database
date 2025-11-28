@@ -2,12 +2,25 @@
 # Server identification
 server-id = 1
 
-# Binary logging (for internal tracking)
+# Binary logging for replication
 log-bin = mysql-bin
 binlog_format = ROW
+binlog_expire_logs_seconds = 604800  # 7 days
+max_binlog_size = 100M
+
+# GTID for easier failover and replication management
+gtid_mode = ON
+enforce_gtid_consistency = ON
+
+# Replication settings
+sync_binlog = 1
+binlog_cache_size = 32K
 
 # Performance schema
 performance_schema = ON
 
 # General settings
 max_connections = 200
+
+# Allow replication user connections
+bind-address = 0.0.0.0

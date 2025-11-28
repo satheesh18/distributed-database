@@ -34,12 +34,15 @@ app.add_middleware(
 
 # Configuration
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "rootpass")
+MYSQL_MASTER_HOST = os.getenv("MYSQL_MASTER_HOST", "mysql-instance-1")
+
+# Three replica configuration
 MYSQL_REPLICAS = [
-    {"id": "replica-1", "host": os.getenv("MYSQL_REPLICA_1_HOST", "mysql-replica-1")},
-    {"id": "replica-2", "host": os.getenv("MYSQL_REPLICA_2_HOST", "mysql-replica-2")},
-    {"id": "replica-3", "host": os.getenv("MYSQL_REPLICA_3_HOST", "mysql-replica-3")},
+    {"id": "instance-2", "host": os.getenv("MYSQL_REPLICA_2_HOST", "mysql-instance-2")},
+    {"id": "instance-3", "host": os.getenv("MYSQL_REPLICA_3_HOST", "mysql-instance-3")},
+    {"id": "instance-4", "host": os.getenv("MYSQL_REPLICA_4_HOST", "mysql-instance-4")},
 ]
-MYSQL_MASTER_HOST = os.getenv("MYSQL_MASTER_HOST", "mysql-replica-4")
+
 
 # Global metrics storage
 metrics_lock = threading.Lock()
@@ -143,6 +146,42 @@ def get_last_applied_timestamp(host: str) -> int:
     except Exception as e:
         print(f"Error getting timestamp from {host}: {e}")
         return 0
+
+
+def get_replication_status(host: str) -> dict:
+    """
+    Get binlog replication status from a replica.
+    
+    Args:
+        host: MySQL host address
+        
+    Returns:
+        Dictionary with replication status or empty dict if unavailable
+    """
+    conn = get_mysql_connection(host)
+    if not conn:
+        return {}
+    
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SHOW SLAVE STATUS")
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if result:
+            return {
+                "slave_io_running": result.get("Slave_IO_Running", "No"),
+                "slave_sql_running": result.get("Slave_SQL_Running", "No"),
+                "seconds_behind_master": result.get("Seconds_Behind_Master", None),
+                "master_host": result.get("Master_Host", ""),
+                "read_master_log_pos": result.get("Read_Master_Log_Pos", 0),
+                "exec_master_log_pos": result.get("Exec_Master_Log_Pos", 0),
+            }
+        return {}
+    except Exception as e:
+        print(f"Error getting replication status from {host}: {e}")
+        return {}
 
 
 def collect_metrics():

@@ -111,7 +111,7 @@ python3 stress_test.py --scenario performance
 ```bash
 # Terminal 1
 for i in {1..10}; do
-  curl -X POST http://localhost:8000/query \
+  curl -X POST http://localhost:9000/query \
     -H "Content-Type: application/json" \
     -d "{\"query\": \"INSERT INTO users (name, email) VALUES ('User$i', 'user$i@example.com')\"}" &
 done
@@ -122,7 +122,7 @@ wait
 
 ```bash
 # Watch metrics in real-time
-watch -n 1 'curl -s http://localhost:8003/metrics | jq'
+watch -n 1 'curl -s http://localhost:9003/metrics | jq'
 ```
 
 ### Test Quorum Selection
@@ -138,7 +138,7 @@ curl -X POST http://localhost:8004/select-quorum \
 
 ```bash
 # See which replica SEER would elect
-curl -X POST http://localhost:8005/elect-leader \
+curl -X POST http://localhost:9005/elect-leader \
   -H "Content-Type: application/json" \
   -d '{}' | jq
 ```
@@ -203,7 +203,7 @@ docker-compose start mysql-replica-4
 **Solution**:
 ```bash
 # Check system status
-curl http://localhost:8000/status
+curl http://localhost:9000/status
 
 # If master is down, restart it
   docker-compose restart mysql-replica-4
@@ -260,7 +260,7 @@ async def custom_workload():
         for i in range(100):
             query = f'INSERT INTO products (name, price) VALUES ("Item{i}", {i})'
             async with session.post(
-                "http://localhost:8000/query",
+                "http://localhost:9000/query",
                 json={"query": query}
             ) as response:
                 result = await response.json()
@@ -274,7 +274,7 @@ asyncio.run(custom_workload())
 ```bash
 # Generate continuous load for 60 seconds
 timeout 60 bash -c 'while true; do
-  curl -X POST http://localhost:8000/query \
+  curl -X POST http://localhost:9000/query \
     -H "Content-Type: application/json" \
     -d "{\"query\": \"INSERT INTO users (name, email) VALUES ('LoadTest', 'load@test.com')\"}"
   sleep 0.1

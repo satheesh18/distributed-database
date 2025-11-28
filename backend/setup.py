@@ -8,7 +8,7 @@ Clears all data and prepares the system for testing.
 import requests
 import time
 
-API_BASE = "http://localhost:8000"
+API_BASE = "http://localhost:9000"
 
 def clear_data():
     """Clear all data from tables"""
