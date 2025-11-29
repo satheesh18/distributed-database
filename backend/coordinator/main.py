@@ -858,7 +858,6 @@ async def stop_master():
             "error": str(e)
         }
 
-
 class FailoverRequest(BaseModel):
     new_leader: Optional[str] = None
 
@@ -1031,7 +1030,480 @@ async def restart_old_master():
             "error": str(e)
         }
 
+class StartInstanceRequest(BaseModel):
+    """Request model for starting a MySQL instance"""
+    instance_id: str  # e.g., "instance-1", "instance-2", etc.
 
+
+class TopologyResponse(BaseModel):
+    """Response model showing current cluster topology"""
+    current_master: Dict
+    current_replicas: List[Dict]
+    total_replicas: int
+
+
+async def wait_for_mysql_ready(container: str, max_retries: int = 30) -> bool:
+    """
+    Wait for MySQL to be ready to accept connections.
+    
+    Args:
+        container: Docker container name
+        max_retries: Maximum number of retry attempts (default 30 = 30 seconds)
+        
+    Returns:
+        True if MySQL is ready, False otherwise
+    """
+    for i in range(max_retries):
+        try:
+            result = subprocess.run(
+                ["docker", "exec", container, "mysqladmin", "-u", "root", "-prootpass", "ping"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            
+            if result.returncode == 0 and "mysqld is alive" in result.stdout:
+                print(f"MySQL in {container} is ready")
+                return True
+        except Exception as e:
+            print(f"Waiting for MySQL in {container}... ({i+1}/{max_retries})")
+        
+        await asyncio.sleep(1)
+    
+    return False
+
+
+async def configure_replica(replica_container: str, master_host: str) -> bool:
+    """
+    Configure a MySQL instance as a replica of the specified master.
+    This version is more robust for restarted containers with detailed diagnostics.
+    
+    Args:
+        replica_container: Container name of the replica
+        master_host: Host name of the master
+        
+    Returns:
+        True if configuration successful, False otherwise
+    """
+    try:
+        print(f"Configuring {replica_container} as replica of {master_host}...")
+        
+        # Wait for MySQL to be fully ready
+        await asyncio.sleep(3)
+        
+        # Step 0: Verify replicator user exists on master
+        print(f"Verifying replicator user on master {master_host}...")
+        verify_user_sql = "SELECT User, Host FROM mysql.user WHERE User='replicator';"
+        result = subprocess.run(
+            ["docker", "exec", replica_container, "mysql", "-h", master_host, "-u", "root", "-prootpass", "-e", verify_user_sql],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            print(f"Cannot connect to master or replicator user missing: {result.stderr}")
+            print("Creating replicator user on master...")
+            create_user_sql = """
+                CREATE USER IF NOT EXISTS 'replicator'@'%' IDENTIFIED WITH mysql_native_password BY 'replicator_password';
+                GRANT REPLICATION SLAVE ON *.* TO 'replicator'@'%';
+                FLUSH PRIVILEGES;
+            """
+            # Try to create user on master
+            master_container = None
+            with state_lock:
+                for inst in MYSQL_INSTANCES:
+                    if inst["host"] == master_host:
+                        master_container = inst["container"]
+                        break
+            
+            if master_container:
+                subprocess.run(
+                    ["docker", "exec", master_container, "mysql", "-u", "root", "-prootpass", "-e", create_user_sql],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                print("Replicator user created")
+        else:
+            print(f"Replicator user verified: {result.stdout}")
+        
+        await asyncio.sleep(1)
+        
+        # Step 1: Stop any existing replication and reset
+        print("Stopping existing replication...")
+        stop_sql = "STOP SLAVE; RESET SLAVE ALL;"
+        result = subprocess.run(
+            ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", stop_sql],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            print(f"Warning: Could not stop existing replication: {result.stderr}")
+        else:
+            print("Existing replication stopped")
+        
+        await asyncio.sleep(1)
+        
+        # Step 2: Reset binary log (important for clean state)
+        print("Resetting binary log...")
+        reset_sql = "RESET MASTER;"
+        result = subprocess.run(
+            ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", reset_sql],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            print(f"Warning: Could not reset master: {result.stderr}")
+        else:
+            print("Binary log reset")
+        
+        await asyncio.sleep(1)
+        
+        # Step 3: Set read-only mode
+        print("Setting read-only mode...")
+        readonly_sql = "SET GLOBAL read_only = ON; SET GLOBAL super_read_only = ON;"
+        result = subprocess.run(
+            ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", readonly_sql],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            print(f"Failed to set read-only mode: {result.stderr}")
+            return False
+        
+        print("Read-only mode set")
+        await asyncio.sleep(1)
+        
+        # Step 4: Configure replication (using CHANGE REPLICATION SOURCE for MySQL 8.0.23+)
+        print("Configuring replication source...")
+        change_master_sql = f"""
+            CHANGE REPLICATION SOURCE TO
+                SOURCE_HOST='{master_host}',
+                SOURCE_USER='replicator',
+                SOURCE_PASSWORD='replicator_password',
+                SOURCE_AUTO_POSITION=1,
+                GET_SOURCE_PUBLIC_KEY=1;
+        """
+        
+        result = subprocess.run(
+            ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", change_master_sql],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        # If newer syntax fails, try older CHANGE MASTER TO syntax
+        if result.returncode != 0:
+            print(f"New syntax failed, trying legacy syntax: {result.stderr}")
+            change_master_sql_legacy = f"""
+                CHANGE MASTER TO
+                    MASTER_HOST='{master_host}',
+                    MASTER_USER='replicator',
+                    MASTER_PASSWORD='replicator_password',
+                    MASTER_AUTO_POSITION=1,
+                    GET_MASTER_PUBLIC_KEY=1;
+            """
+            
+            result = subprocess.run(
+                ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", change_master_sql_legacy],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode != 0:
+                print(f"Failed to configure replication (both syntaxes): {result.stderr}")
+                return False
+        
+        print("Replication source configured")
+        await asyncio.sleep(1)
+        
+        # Step 5: Start replication (try both syntaxes)
+        print("Starting replication...")
+        start_sql = "START REPLICA;"
+        result = subprocess.run(
+            ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", start_sql],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            print(f"New syntax failed, trying legacy: {result.stderr}")
+            start_sql_legacy = "START SLAVE;"
+            result = subprocess.run(
+                ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", start_sql_legacy],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode != 0:
+                print(f"Failed to start replication: {result.stderr}")
+                return False
+        
+        print("Replication started")
+        
+        # Step 6: Wait for replication to initialize
+        await asyncio.sleep(5)
+        
+        # Step 7: Verify replication status with retries
+        print("Verifying replication status...")
+        max_retries = 10
+        for attempt in range(max_retries):
+            # Try both SHOW REPLICA STATUS and SHOW SLAVE STATUS
+            check_sql = "SHOW REPLICA STATUS\\G"
+            result = subprocess.run(
+                ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", check_sql],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            # Try legacy syntax if new one fails
+            if result.returncode != 0:
+                check_sql = "SHOW SLAVE STATUS\\G"
+                result = subprocess.run(
+                    ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", check_sql],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+            
+            if result.returncode == 0:
+                output = result.stdout
+                
+                # Print full output for debugging
+                if attempt == 0:
+                    print(f"Replication status:\n{output[:500]}")
+                
+                # Check both old and new field names
+                io_running = ("Slave_IO_Running: Yes" in output or 
+                             "Replica_IO_Running: Yes" in output)
+                sql_running = ("Slave_SQL_Running: Yes" in output or 
+                              "Replica_SQL_Running: Yes" in output)
+                
+                # Extract errors
+                last_io_error = ""
+                last_sql_error = ""
+                for line in output.split('\n'):
+                    if 'Last_IO_Error:' in line or 'Last_IO_Errno:' in line:
+                        error_text = line.split(':', 1)[1].strip() if ':' in line else ''
+                        if error_text and error_text != '0':
+                            last_io_error = error_text
+                    if 'Last_SQL_Error:' in line or 'Last_SQL_Errno:' in line:
+                        error_text = line.split(':', 1)[1].strip() if ':' in line else ''
+                        if error_text and error_text != '0':
+                            last_sql_error = error_text
+                
+                if io_running and sql_running:
+                    print(f"✓ Successfully configured {replica_container} as replica (replication active)")
+                    return True
+                else:
+                    print(f"Replication attempt {attempt+1}/{max_retries}: IO={io_running}, SQL={sql_running}")
+                    if last_io_error:
+                        print(f"  IO Error: {last_io_error}")
+                    if last_sql_error:
+                        print(f"  SQL Error: {last_sql_error}")
+                    
+                    # If not the last attempt, wait and retry
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(3)
+            else:
+                print(f"Failed to check replication status: {result.stderr}")
+                await asyncio.sleep(2)
+        
+        print(f"✗ Replication configuration failed after {max_retries} attempts")
+        return False
+        
+    except Exception as e:
+        print(f"✗ Error configuring replica: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+@app.post("/admin/start-instance", response_model=TopologyResponse)
+async def start_instance(request: StartInstanceRequest):
+    """
+    Start a specific MySQL instance and configure it as a replica of the current master.
+    
+    This endpoint:
+    1. Starts the specified MySQL container
+    2. Waits for MySQL to be ready
+    3. Configures it as a replica of the current master
+    4. Adds it to the current_replicas list
+    5. Returns the updated cluster topology
+    
+    Args:
+        request: StartInstanceRequest with instance_id
+        
+    Returns:
+        TopologyResponse with current master and replicas
+    """
+    global current_master, current_replicas
+    
+    try:
+        instance_id = request.instance_id
+        
+        # Find the instance in the global MYSQL_INSTANCES list
+        instance_info = next((inst for inst in MYSQL_INSTANCES if inst["id"] == instance_id), None)
+        
+        if not instance_info:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Instance {instance_id} not found in configuration"
+            )
+        
+        instance_container = instance_info["container"]
+        instance_host = instance_info["host"]
+        
+        with state_lock:
+            current_master_host = current_master["host"]
+            current_master_id = current_master["id"]
+            
+            # Check if this instance is the current master
+            if instance_id == current_master_id:
+                return TopologyResponse(
+                    current_master=current_master,
+                    current_replicas=current_replicas,
+                    total_replicas=len(current_replicas)
+                )
+            
+            # Check if instance is already a replica
+            already_replica = any(r["id"] == instance_id for r in current_replicas)
+        
+        if already_replica:
+            return TopologyResponse(
+                current_master=current_master,
+                current_replicas=current_replicas,
+                total_replicas=len(current_replicas)
+            )
+        
+        # Step 1: Start the container
+        print(f"Starting {instance_container} container...")
+        result = subprocess.run(
+            ["docker", "start", instance_container],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to start {instance_id}: {result.stderr}"
+            )
+        
+        print(f"Container {instance_container} started successfully")
+        
+        # Step 2: Wait for MySQL to be ready
+        mysql_ready = await wait_for_mysql_ready(instance_container, max_retries=30)
+        
+        if not mysql_ready:
+            raise HTTPException(
+                status_code=500,
+                detail=f"MySQL in {instance_id} did not become ready in time"
+            )
+        
+        # Step 3: Configure as replica of current master
+        config_success = await configure_replica(instance_container, current_master_host)
+        
+        if not config_success:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Instance {instance_id} started but replication configuration failed. Check logs for details."
+            )
+        
+        # Step 4: Add to replicas list
+        with state_lock:
+            current_replicas.append(instance_info)
+            
+            response = TopologyResponse(
+                current_master=current_master.copy(),
+                current_replicas=[r.copy() for r in current_replicas],
+                total_replicas=len(current_replicas)
+            )
+        
+        print(f"Instance {instance_id} configured as replica of {current_master_id}")
+        
+        return response
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to start instance: {str(e)}"
+        )
+
+
+@app.get("/admin/topology", response_model=TopologyResponse)
+async def get_topology():
+    """
+    Get the current cluster topology.
+    
+    Returns:
+        TopologyResponse with current master and all replicas
+    """
+    with state_lock:
+        return TopologyResponse(
+            current_master=current_master.copy(),
+            current_replicas=[r.copy() for r in current_replicas],
+            total_replicas=len(current_replicas)
+        )
+
+@app.post("/admin/stop-master-only")
+async def stop_master_only(request: dict):
+    """
+    Stop the current MySQL master container ONLY (no election or promotion).
+    The frontend will handle calling SEER and promotion separately.
+    """
+    global current_master, current_replicas
+    
+    try:
+        with state_lock:
+            master_container = current_master["container"]
+            master_id = current_master["id"]
+        
+        # Stop the master container
+        print(f"Stopping {master_container} container...")
+        result = subprocess.run(
+            ["docker", "stop", master_container],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            print(f"Failed to stop master: {result.stderr}")
+            return {
+                "success": False,
+                "message": "Failed to stop master",
+                "error": result.stderr
+            }
+        
+        print(f"Master {master_container} stopped successfully")
+        
+        return {
+            "success": True,
+            "message": f"Master {master_id} stopped successfully",
+            "stopped_master": master_id,
+            "stopped_container": master_container
+        }
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "message": "Failed to stop master",
+            "error": str(e)
+        }
 # ==================== STRESS TEST ENDPOINTS ====================
 
 class StressTestRequest(BaseModel):

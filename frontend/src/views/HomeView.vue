@@ -885,81 +885,161 @@ const electLeaderOnly = async () => {
     electionInProgress.value = false
   }
 }
+
+// Helper function for delays
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
 const stopMaster = async () => {
   failoverInProgress.value = true
   failoverFlow.value = []
   failoverResult.value = null
   
   try {
+    const oldMasterId = systemStatus.value.current_master?.id || 'instance-1'
+    const oldMasterHost = systemStatus.value.current_master?.host || 'mysql-instance-1'
+    const oldMasterContainer = systemStatus.value.current_master?.container || 'mysql-instance-1'
+    
+    // Step 1: Stop the master container
     failoverFlow.value.push({
-      title: 'Stopping Master Container',
-      detail: 'Executing: docker stop mysql-instance-1'
+      title: 'Step 1: Stopping Master Container',
+      detail: `Executing: docker stop ${oldMasterContainer}`
     })
     
-    const response = await fetch(`${API_BASE}/admin/stop-master`, {
+    const stopResponse = await fetch(`${API_BASE}/admin/stop-master-only`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ master_id: oldMasterId })
     })
     
-    const result = await response.json()
+    const stopResult = await stopResponse.json()
     
-    if (result.success) {
-      failoverFlow.value.push({
-        title: 'Master Stopped',
-        detail: 'Master container is now down'
-      })
-      
-      if (result.new_leader_id) {
-        failoverFlow.value.push({
-          title: 'Leader Elected',
-          detail: `New leader: ${result.new_leader_id} (${result.new_master})`
-        })
-        
-        if (result.election_details) {
-          failoverFlow.value.push({
-            title: 'Election Details',
-            detail: `Score: ${result.election_details.score?.toFixed(3)}, Latency: ${result.election_details.latency_ms?.toFixed(2)}ms, Lag: ${result.election_details.replication_lag}`
-          })
-        }
-      }
-      
-      failoverResult.value = {
-        success: true,
-        message: result.message || 'Master stopped and failover complete! Auto-recovery starting...'
-      }
-      
-      masterRunning.value = false
-      
-      // Refresh status after a delay
-      setTimeout(async () => {
-        await fetchSystemStatus()
-        await fetchMetrics()
-      }, 2000)
-      
-      // Start auto-recovery countdown and process
-      startAutoRecovery()
-    } else {
-      failoverFlow.value.push({
-        title: 'Failover Failed',
-        detail: result.error || result.message || 'Unknown error'
-      })
-      
-      if (result.hint) {
-        failoverFlow.value.push({
-          title: 'Hint',
-          detail: result.hint
-        })
-      }
-      
-      failoverResult.value = {
-        success: false,
-        message: `${result.message || 'Failed to stop master'}\n${result.hint || ''}`
-      }
-      failoverInProgress.value = false
+    if (!stopResult.success) {
+      throw new Error(stopResult.error || stopResult.message || 'Failed to stop master')
     }
+    
+    failoverFlow.value.push({
+      title: 'Step 2: Master Stopped',
+      detail: `Container ${oldMasterContainer} is now down`
+    })
+    
+    await sleep(2000)
+    
+    // Step 2: Call SEER to elect new leader (exclude the stopped master)
+    failoverFlow.value.push({
+      title: 'Step 3: Calling SEER Algorithm',
+      detail: 'Analyzing remaining replicas to select optimal leader...'
+    })
+    
+    const seerResponse = await fetch('http://localhost:9005/elect-leader', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        exclude_replicas: [oldMasterId]  // Exclude the stopped master from election
+      })
+    })
+    
+    if (!seerResponse.ok) {
+      throw new Error('SEER election failed')
+    }
+    
+    const seerData = await seerResponse.json()
+    
+    failoverFlow.value.push({
+      title: 'Step 4: SEER Elected New Leader',
+      detail: `Elected: ${seerData.leader_id} (Score: ${seerData.score.toFixed(3)}, Latency: ${seerData.latency_ms.toFixed(2)}ms, Lag: ${seerData.replication_lag})`
+    })
+    
+    await sleep(1000)
+    
+    // Step 3: Promote the elected leader
+    failoverFlow.value.push({
+      title: 'Step 5: Promoting New Leader',
+      detail: `Promoting ${seerData.leader_id} to master...`
+    })
+    
+    const failoverResponse = await fetch(`${API_BASE}/admin/trigger-failover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_leader: seerData.leader_id })
+    })
+    
+    if (!failoverResponse.ok) {
+      throw new Error('Failover promotion failed')
+    }
+    
+    const failoverData = await failoverResponse.json()
+    
+    if (!failoverData.success) {
+      throw new Error(failoverData.error || failoverData.message || 'Failover failed')
+    }
+    
+    failoverFlow.value.push({
+      title: 'Step 6: New Master Promoted',
+      detail: `${failoverData.new_master} is now the master`
+    })
+    
+    // Update UI to show new topology
+    await fetchSystemStatus()
+    await fetchMetrics()
+    
+    await sleep(3000)
+    
+    // Step 4: Restart old master as replica
+    failoverFlow.value.push({
+      title: 'Step 7: Restarting Old Master',
+      detail: `Starting ${oldMasterContainer} container and configuring as replica...`
+    })
+    
+    const restartResponse = await fetch(`${API_BASE}/admin/start-instance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instance_id: oldMasterId })
+    })
+    
+    if (!restartResponse.ok) {
+      throw new Error('Failed to restart old master')
+    }
+    
+    const restartData = await restartResponse.json()
+    
+    failoverFlow.value.push({
+      title: 'Step 8: Old Master Restarted',
+      detail: `Container ${oldMasterContainer} is running and healthy`
+    })
+    
+    failoverFlow.value.push({
+      title: 'Step 9: Configured as Replica',
+      detail: `${oldMasterId} is now replicating from ${restartData.current_master.id}`
+    })
+    
+    failoverFlow.value.push({
+      title: 'Step 10: Failover Complete',
+      detail: `New master: ${restartData.current_master.id}, Total replicas: ${restartData.total_replicas}`
+    })
+    
+    // Update system status with final state
+    systemStatus.value = {
+      current_master: restartData.current_master,
+      current_replicas: restartData.current_replicas,
+      total_replicas: restartData.total_replicas,
+      replication_mode: 'binlog'
+    }
+    
+    failoverResult.value = {
+      success: true,
+      message: `Complete failover with recovery! New master: ${restartData.current_master.id}, Old master ${oldMasterId} recovered as replica.`
+    }
+    
+    masterRunning.value = true
+    
+    // Final refresh to ensure UI is in sync
+    await sleep(2000)
+    await fetchSystemStatus()
+    await fetchMetrics()
+    
   } catch (error: any) {
     failoverFlow.value.push({
-      title: 'Request Failed',
+      title: 'Failover Failed',
       detail: error.message
     })
     
@@ -967,6 +1047,7 @@ const stopMaster = async () => {
       success: false,
       message: `Error: ${error.message}`
     }
+  } finally {
     failoverInProgress.value = false
   }
 }

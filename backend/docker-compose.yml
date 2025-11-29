@@ -16,7 +16,7 @@ services:
     networks:
       - db-network
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p{MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -39,7 +39,7 @@ services:
       mysql-instance-1:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p{MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -63,7 +63,7 @@ services:
       mysql-instance-1:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p{MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -87,7 +87,7 @@ services:
       mysql-instance-1:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p{MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 3s
       retries: 5
