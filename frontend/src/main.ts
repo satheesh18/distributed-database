@@ -18,6 +18,7 @@ import Panel from 'primevue/panel'
 import Textarea from 'primevue/textarea'
 import Message from 'primevue/message'
 import ProgressSpinner from 'primevue/progressspinner'
+import ProgressBar from 'primevue/progressbar'
 import Timeline from 'primevue/timeline'
 import Divider from 'primevue/divider'
 import Chip from 'primevue/chip'
@@ -48,6 +49,7 @@ app.component('Panel', Panel)
 app.component('Textarea', Textarea)
 app.component('Message', Message)
 app.component('ProgressSpinner', ProgressSpinner)
+app.component('ProgressBar', ProgressBar)
 app.component('Timeline', Timeline)
 app.component('Divider', Divider)
 app.component('Chip', Chip)

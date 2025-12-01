@@ -1,502 +1,518 @@
 <template>
-  <div class="container">
+  <div class="dashboard">
     <!-- Header -->
-    <div class="header">
-      <h1>🗄️ Distributed Database Dashboard</h1>
-      <p>Real-time monitoring and control of distributed MySQL system with adaptive quorum and leader election</p>
-    </div>
+    <header class="dashboard-header">
+      <h1>Distributed Database Dashboard</h1>
+      <p>Real-time monitoring and control for MySQL cluster with adaptive quorum and leader election</p>
+    </header>
 
-    <!-- Service Status -->
-    <Panel header="Service Status" class="mb-4">
-      <div class="grid grid-3">
-        <Card v-for="service in services" :key="service.name">
-          <template #title>
-            <div class="flex justify-content-between align-items-center">
-              <span>{{ service.name }}</span>
-              <Tag :severity="service.healthy ? 'success' : 'danger'">
-                <span class="status-badge">
-                  <span class="status-dot" :class="{ healthy: service.healthy, unhealthy: !service.healthy }"></span>
-                  {{ service.healthy ? 'Healthy' : 'Down' }}
-                </span>
-              </Tag>
-            </div>
-          </template>
-          <template #content>
-            <div class="text-sm text-color-secondary">
-              <div><strong>Port:</strong> {{ service.port }}</div>
-              <div v-if="service.role"><strong>Role:</strong> {{ service.role }}</div>
-            </div>
-          </template>
-        </Card>
+    <!-- Section 1: Service Status -->
+    <section class="dashboard-section">
+      <div class="section-header">
+        <h2>Service Status</h2>
+        <span class="section-subtitle">Health check of all distributed components</span>
       </div>
-    </Panel>
-
-    <!-- Metrics -->
-    <Panel header="Replica Metrics" class="mb-4">
-      <div class="metric-card mb-3">
-        <div class="metric-label">Master Timestamp</div>
-        <div class="metric-value">
-          <Tag severity="info">{{ masterTimestamp }}</Tag>
+      
+      <div class="services-grid">
+        <div v-for="service in services" :key="service.name" class="service-card" :class="{ healthy: service.healthy, unhealthy: !service.healthy }">
+          <div class="service-status-indicator"></div>
+          <div class="service-info">
+            <div class="service-name">{{ service.name }}</div>
+            <div class="service-details">
+              <span class="service-port">Port {{ service.port }}</span>
+              <span class="service-role">{{ service.role }}</span>
+            </div>
+          </div>
+          <div class="service-status-text">{{ service.healthy ? 'Online' : 'Offline' }}</div>
         </div>
       </div>
-      <DataTable :value="metrics" :loading="loadingMetrics">
-        <Column field="replica_id" header="Replica ID"></Column>
-        <Column field="latency_ms" header="Latency (ms)">
-          <template #body="slotProps">
-            {{ slotProps.data.latency_ms.toFixed(2) }}
-          </template>
-        </Column>
-        <Column field="replication_lag" header="Timestamp Lag">
-          <template #body="slotProps">
-            <Tag :severity="slotProps.data.replication_lag === 0 ? 'success' : slotProps.data.replication_lag < 5 ? 'warning' : 'danger'">
-              {{ slotProps.data.replication_lag }} behind
-            </Tag>
-          </template>
-        </Column>
-        <Column header="Replica Timestamp">
-          <template #body="slotProps">
-            {{ masterTimestamp - slotProps.data.replication_lag }}
-          </template>
-        </Column>
-        <Column field="uptime_seconds" header="Uptime (s)">
-          <template #body="slotProps">
-            {{ slotProps.data.uptime_seconds.toFixed(1) }}
-          </template>
-        </Column>
-        <Column field="crash_count" header="Crashes"></Column>
-        <Column field="is_healthy" header="Status">
-          <template #body="slotProps">
-            <Tag :severity="slotProps.data.is_healthy ? 'success' : 'danger'">
-              {{ slotProps.data.is_healthy ? 'Healthy' : 'Unhealthy' }}
-            </Tag>
-          </template>
-        </Column>
-      </DataTable>
-    </Panel>
+    </section>
 
-    <!-- Consistency Metrics -->
-    <Panel header="Consistency Level Metrics" class="mb-4">
-      <DataTable :value="consistencyMetricsArray" :loading="loadingConsistencyMetrics">
-        <Column field="level" header="Level">
-          <template #body="slotProps">
-            <Tag :severity="getConsistencySeverity(slotProps.data.level)">{{ slotProps.data.level }}</Tag>
-          </template>
-        </Column>
-        <Column field="count" header="Requests">
-          <template #body="slotProps">
-            {{ slotProps.data.count }}
-          </template>
-        </Column>
-        <Column field="avg_latency_ms" header="Avg Latency (ms)">
-          <template #body="slotProps">
-            <Tag :severity="getLatencySeverity(slotProps.data.avg_latency_ms)">
-              {{ slotProps.data.avg_latency_ms.toFixed(2) }}
-            </Tag>
-          </template>
-        </Column>
-        <Column field="failures" header="Failures">
-          <template #body="slotProps">
-            <Tag :severity="slotProps.data.failures > 0 ? 'danger' : 'success'">
-              {{ slotProps.data.failures }}
-            </Tag>
-          </template>
-        </Column>
-        <Column field="success_rate" header="Success Rate">
-          <template #body="slotProps">
-            <Tag :severity="slotProps.data.success_rate >= 95 ? 'success' : 'warning'">
-              {{ slotProps.data.success_rate.toFixed(1) }}%
-            </Tag>
-          </template>
-        </Column>
-      </DataTable>
-    </Panel>
+    <!-- Section 2: Cluster Topology -->
+    <section class="dashboard-section">
+      <div class="section-header">
+        <h2>Cluster Topology</h2>
+        <span class="section-subtitle">Current master-replica configuration and replication metrics</span>
+      </div>
 
-    <!-- Query Execution -->
-    <Panel header="Query Execution" class="mb-4">
-      <div class="query-section">
-        <div class="mb-3">
-          <label class="block mb-2 font-semibold">SQL Query</label>
-          <Textarea 
-            v-model="query" 
-            rows="3" 
-            class="w-full"
-            placeholder="Enter SQL query (e.g., SELECT * FROM users)"
-          />
+      <div class="topology-container">
+        <!-- Master Node -->
+        <div class="topology-master">
+          <div class="node-card master">
+            <div class="node-badge">MASTER</div>
+            <div class="node-id">{{ systemStatus.current_master?.id || 'Loading...' }}</div>
+            <div class="node-host">{{ systemStatus.current_master?.host || '' }}</div>
+            <div class="node-info">
+              <span>Accepts all writes</span>
+              <span>Binlog source</span>
+            </div>
+          </div>
         </div>
-        
-        <div class="mb-3">
-          <label class="block mb-2 font-semibold">Consistency Levels</label>
-          <Dropdown 
-            v-model="consistencyLevel" 
-            :options="consistencyOptions" 
-            optionLabel="label" 
-            optionValue="value"
-            placeholder="Select Consistency Level"
-            class="w-full"
-          >
-            <template #value="slotProps">
-              <div v-if="slotProps.value">
-                <Tag :severity="getConsistencySeverity(slotProps.value)" class="mr-2">{{ slotProps.value }}</Tag>
-                <span class="text-sm">{{ getConsistencyDescription(slotProps.value) }}</span>
+
+        <!-- Replication Arrow -->
+        <div class="replication-flow">
+          <div class="flow-line"></div>
+          <div class="flow-label">Binlog Replication</div>
+        </div>
+
+        <!-- Replica Nodes -->
+        <div class="topology-replicas">
+          <div v-for="replica in metrics" :key="replica.replica_id" class="node-card replica" :class="{ unhealthy: !replica.is_healthy }">
+            <div class="node-badge">REPLICA</div>
+            <div class="node-id">{{ replica.replica_id }}</div>
+            
+            <div class="replica-metrics">
+              <div class="metric-row">
+                <span class="metric-name">Latency</span>
+                <span class="metric-value" :class="getLatencyClass(replica.latency_ms)">{{ replica.latency_ms.toFixed(1) }}ms</span>
               </div>
-            </template>
-            <template #option="slotProps">
-              <div>
-                <Tag :severity="getConsistencySeverity(slotProps.option.value)" class="mr-2">{{ slotProps.option.value }}</Tag>
-                <span class="text-sm">{{ slotProps.option.description }}</span>
+              <div class="metric-row">
+                <span class="metric-name">Replication Lag</span>
+                <span class="metric-value" :class="getLagClass(replica.replication_lag)">{{ replica.replication_lag }} txns</span>
               </div>
-            </template>
-          </Dropdown>
-        </div>
-        
-        <div class="action-buttons mb-3">
-          <Button 
-            label="Execute Query" 
-            icon="pi pi-play" 
-            @click="executeQuery"
-            :loading="executing"
-            severity="primary"
-          />
-          <Button 
-            label="Insert Sample Data" 
-            icon="pi pi-plus" 
-            @click="insertSampleData"
-            severity="secondary"
-          />
-          <Button 
-            label="Get Quorum" 
-            icon="pi pi-users" 
-            @click="getQuorum"
-            severity="info"
-          />
-        </div>
-
-        <!-- Execution Flow -->
-        <div v-if="executionFlow.length > 0" class="execution-flow">
-          <h4 class="mb-3">Execution Flow</h4>
-          <div v-for="(step, index) in executionFlow" :key="index" class="flow-step">
-            <div class="flow-step-number">{{ index + 1 }}</div>
-            <div class="flow-step-content">
-              <div class="flow-step-title">{{ step.title }}</div>
-              <div class="flow-step-detail">{{ step.detail }}</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Query Result -->
-        <div v-if="queryResult" class="mt-3">
-          <Message :severity="queryResult.success ? 'success' : 'error'" :closable="false">
-            {{ queryResult.message }}
-          </Message>
-          <div v-if="queryResult.data && queryResult.data.length > 0" class="mt-2">
-            <DataTable :value="queryResult.data" class="mt-2">
-              <Column v-for="col in Object.keys(queryResult.data[0])" :key="col" :field="col" :header="col"></Column>
-            </DataTable>
-          </div>
-        </div>
-      </div>
-    </Panel>
-
-    <!-- Failover Testing -->
-    <Panel header="🔄 Failover Testing" class="mb-4">
-      <div class="danger-zone">
-        <h4>Master Failover (Binlog-Based with 3 Replicas)</h4>
-        <p class="text-sm mb-3">Test failover scenarios. SEER will elect the best replica based on latency, lag, and stability.</p>
-        <div class="action-buttons">
-          <Button 
-            label="Stop Master (Crash + Recovery)" 
-            icon="pi pi-power-off" 
-            @click="stopMaster"
-            severity="danger"
-            :loading="failoverInProgress"
-          />
-          <Button 
-            label="Elect New Leader (Graceful)" 
-            icon="pi pi-star" 
-            @click="electLeaderOnly"
-            severity="warning"
-            :loading="electionInProgress"
-          />
-        </div>
-        <p v-if="failoverInProgress" class="text-sm mt-2" style="color: orange;">
-          ⏳ Stopping master and recovering... {{ recoveryCountdown > 0 ? `(${recoveryCountdown}s)` : '' }}
-        </p>
-        
-        <!-- Failover Execution Flow -->
-        <div v-if="failoverFlow.length > 0" class="execution-flow mt-3">
-          <h4 class="mb-3">Failover Progress</h4>
-          <div v-for="(step, index) in failoverFlow" :key="index" class="flow-step">
-            <div class="flow-step-number">{{ index + 1 }}</div>
-            <div class="flow-step-content">
-              <div class="flow-step-title">{{ step.title }}</div>
-              <div class="flow-step-detail">{{ step.detail }}</div>
-            </div>
-          </div>
-        </div>
-        
-        <!-- Failover Result -->
-        <div v-if="failoverResult" class="mt-3">
-          <Message :severity="failoverResult.success ? 'success' : 'error'" :closable="false">
-            {{ failoverResult.message }}
-          </Message>
-        </div>
-      </div>
-    </Panel>
-
-    <!-- System Status -->
-    <Panel header="System Status" class="mb-4">
-      <div class="metric-card">
-        <div class="metric-label">Current Master</div>
-        <div class="metric-value">{{ systemStatus.current_master?.id || 'Loading...' }} ({{ systemStatus.current_master?.host || '' }})</div>
-      </div>
-      <div class="metric-card mt-2">
-        <div class="metric-label">Current Replicas ({{ systemStatus.total_replicas || 0 }})</div>
-        <div class="metric-value">
-          <div v-for="replica in systemStatus.current_replicas" :key="replica.id" class="text-sm">
-            {{ replica.id }} ({{ replica.host }})
-          </div>
-        </div>
-      </div>
-      <div class="metric-card mt-2">
-        <div class="metric-label">Replication Mode</div>
-        <div class="metric-value">
-          <Tag severity="info">
-            {{ systemStatus.replication_mode || 'binlog' }} (MySQL Native)
-          </Tag>
-        </div>
-      </div>
-      <div class="metric-card mt-2">
-        <div class="metric-label">Quorum Size</div>
-        <div class="metric-value">
-          <Tag severity="success">
-            2 out of {{ systemStatus.total_replicas || 3 }} replicas
-          </Tag>
-        </div>
-      </div>
-    </Panel>
-
-    <!-- Stress Testing -->
-    <Panel header="🔥 Stress Testing" class="mb-4">
-      <div class="stress-test-section">
-        <p class="text-sm mb-3">Test distributed system performance under load. These tests demonstrate timestamp ordering, quorum replication, and consistency trade-offs.</p>
-        
-        <!-- Data Count & Clear -->
-        <div class="metric-card mb-3">
-          <div class="flex justify-content-between align-items-center">
-            <div>
-              <div class="metric-label">Current Test Data</div>
-              <div class="metric-value">
-                <Tag severity="info" class="mr-2">{{ dataCount.users }} users</Tag>
-                <Tag severity="info">{{ dataCount.products }} products</Tag>
+              <div class="metric-row">
+                <span class="metric-name">Uptime</span>
+                <span class="metric-value">{{ formatUptime(replica.uptime_seconds) }}</span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-name">Status</span>
+                <span class="metric-value" :class="replica.is_healthy ? 'good' : 'bad'">{{ replica.is_healthy ? 'Healthy' : 'Unhealthy' }}</span>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Metrics Explanation -->
+      <div class="metrics-explanation">
+        <h3>Understanding the Metrics</h3>
+        <div class="explanation-grid">
+          <div class="explanation-item">
+            <div class="explanation-term">Latency</div>
+            <div class="explanation-desc">Round-trip time to reach the replica. Lower is better. High latency (&gt;100ms) may indicate network issues or overloaded nodes.</div>
+          </div>
+          <div class="explanation-item">
+            <div class="explanation-term">Replication Lag</div>
+            <div class="explanation-desc">Number of transactions the replica is behind the master. A lag of 0 means the replica has all committed data. High lag may cause stale reads.</div>
+          </div>
+          <div class="explanation-item">
+            <div class="explanation-term">Uptime</div>
+            <div class="explanation-desc">Time since the replica was last started. Longer uptime generally indicates stability. Recent restarts may indicate issues.</div>
+          </div>
+          <div class="explanation-item">
+            <div class="explanation-term">Timestamp</div>
+            <div class="explanation-desc">Current master timestamp: <strong>{{ masterTimestamp }}</strong>. Each write operation gets a unique, monotonically increasing timestamp for ordering.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 3: Failover Testing -->
+    <section class="dashboard-section">
+      <div class="section-header">
+        <h2>Failover Testing</h2>
+        <span class="section-subtitle">Test leader election and automatic recovery mechanisms</span>
+      </div>
+
+      <div class="failover-container">
+        <div class="failover-info">
+          <p>The SEER (Smart Election and Evaluation for Replicas) algorithm automatically selects the best replica to become the new master based on:</p>
+          <ul>
+            <li><strong>Latency Score:</strong> Lower latency replicas are preferred for faster response times</li>
+            <li><strong>Replication Lag:</strong> Replicas closer to the master's state minimize data loss</li>
+            <li><strong>Stability:</strong> Uptime and crash history affect the selection</li>
+          </ul>
+        </div>
+
+        <div class="failover-actions">
+          <div class="action-card">
+            <h4>Crash and Recovery Test</h4>
+            <p>Stops the current master container, triggers SEER election, promotes best replica, then restarts old master as a replica.</p>
             <Button 
-              label="Clear All Data" 
-              icon="pi pi-trash" 
-              @click="clearData"
-              severity="secondary"
-              size="small"
-              :loading="clearingData"
+              label="Stop Master and Failover" 
+              @click="stopMaster"
+              severity="danger"
+              :loading="failoverInProgress"
+              :disabled="failoverInProgress || electionInProgress"
             />
+          </div>
+          
+          <div class="action-card">
+            <h4>Graceful Leader Election</h4>
+            <p>Performs a controlled failover without stopping any containers. Current master is demoted to replica.</p>
+            <Button 
+              label="Elect New Leader" 
+              @click="electLeaderOnly"
+              severity="warning"
+              :loading="electionInProgress"
+              :disabled="failoverInProgress || electionInProgress"
+            />
+          </div>
+        </div>
+
+        <!-- Failover Progress -->
+        <div v-if="failoverFlow.length > 0" class="failover-progress">
+          <h4>Failover Progress</h4>
+          <div class="progress-steps">
+            <div v-for="(step, index) in failoverFlow" :key="index" class="progress-step">
+              <div class="step-number">{{ index + 1 }}</div>
+              <div class="step-content">
+                <div class="step-title">{{ step.title }}</div>
+                <div class="step-detail">{{ step.detail }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Failover Result -->
+        <div v-if="failoverResult" class="failover-result" :class="{ success: failoverResult.success, error: !failoverResult.success }">
+          {{ failoverResult.message }}
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 4: Stress Testing -->
+    <section class="dashboard-section">
+      <div class="section-header">
+        <h2>Stress Testing</h2>
+        <span class="section-subtitle">Observe distributed database behavior under concurrent load</span>
+      </div>
+
+      <div class="stress-test-container">
+        <!-- What This Tests -->
+        <div class="test-explanation">
+          <h4>What Are We Testing?</h4>
+          <div class="test-goals">
+            <div class="test-goal">
+              <div class="goal-icon">1</div>
+              <div class="goal-content">
+                <strong>Timestamp Ordering</strong>
+                <p>Every write gets a unique, monotonically increasing timestamp from our distributed timestamp services. We verify all operations are correctly ordered.</p>
+              </div>
+            </div>
+            <div class="test-goal">
+              <div class="goal-icon">2</div>
+              <div class="goal-content">
+                <strong>Replication Consistency</strong>
+                <p>Writes go to the master, then propagate to replicas via binlog replication. We measure how quickly replicas catch up.</p>
+              </div>
+            </div>
+            <div class="test-goal">
+              <div class="goal-icon">3</div>
+              <div class="goal-content">
+                <strong>Quorum Behavior</strong>
+                <p>Different consistency levels wait for different numbers of replicas to confirm. See the real latency vs durability tradeoff.</p>
+              </div>
+            </div>
           </div>
         </div>
 
         <!-- Test Configuration -->
-        <div class="grid grid-2 mb-3">
-          <div>
-            <label class="block mb-2 font-semibold">Operations Count</label>
-            <Dropdown 
-              v-model="stressTestOps" 
-              :options="[10, 25, 50, 100, 200]" 
-              placeholder="Select count"
-              class="w-full"
-            />
+        <div class="test-config">
+          <div class="config-header">
+            <h4>Configure Test</h4>
+            <div class="data-info">
+              <span>Current data: {{ dataCount.users }} users, {{ dataCount.products }} products</span>
+              <Button 
+                label="Clear Data" 
+                @click="clearData"
+                severity="secondary"
+                size="small"
+                :loading="clearingData"
+                text
+              />
+            </div>
           </div>
-          <div>
-            <label class="block mb-2 font-semibold">Consistency Level</label>
-            <Dropdown 
-              v-model="stressTestConsistency" 
-              :options="consistencyOptions" 
-              optionLabel="label" 
-              optionValue="value"
-              placeholder="Select level"
-              class="w-full"
-            />
+          <div class="config-options">
+            <div class="config-option">
+              <label>Number of Concurrent Operations</label>
+              <div class="option-buttons">
+                <button 
+                  v-for="n in [10, 25, 50, 100]" 
+                  :key="n" 
+                  :class="{ active: stressTestOps === n }"
+                  @click="stressTestOps = n"
+                >{{ n }}</button>
+              </div>
+            </div>
+            <div class="config-option">
+              <label>Consistency Level</label>
+              <div class="option-buttons consistency-buttons">
+                <button 
+                  v-for="opt in consistencyOptions" 
+                  :key="opt.value" 
+                  :class="['consistency-btn', opt.value.toLowerCase(), { active: stressTestConsistency === opt.value }]"
+                  @click="stressTestConsistency = opt.value"
+                >
+                  <span class="btn-label">{{ opt.value }}</span>
+                  <span class="btn-desc">{{ opt.shortDesc }}</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- Test Buttons -->
-        <div class="action-buttons mb-3">
+        <!-- Run Test Button -->
+        <div class="run-test-section">
           <Button 
-            label="Concurrent Writes" 
-            icon="pi pi-bolt" 
-            @click="runConcurrentWritesTest"
+            label="Run Stress Test" 
+            @click="runStressTest"
             severity="primary"
-            :loading="stressTestRunning === 'concurrent'"
+            size="large"
+            :loading="stressTestRunning !== null"
             :disabled="stressTestRunning !== null"
+            icon="pi pi-play"
           />
-          <Button 
-            label="Read/Write Mix" 
-            icon="pi pi-sync" 
-            @click="runReadWriteMixTest"
-            severity="info"
-            :loading="stressTestRunning === 'mix'"
-            :disabled="stressTestRunning !== null"
-          />
-          <Button 
-            label="Compare Consistency Levels" 
-            icon="pi pi-chart-bar" 
-            @click="runConsistencyComparisonTest"
-            severity="warning"
-            :loading="stressTestRunning === 'comparison'"
-            :disabled="stressTestRunning !== null"
-          />
-        </div>
-
-        <!-- Test Progress -->
-        <div v-if="stressTestRunning" class="mb-3">
-          <ProgressBar mode="indeterminate" style="height: 6px" />
-          <p class="text-sm mt-2" style="color: orange;">
-            ⏳ Running {{ stressTestRunning }} test with {{ stressTestOps }} operations...
+          <p class="run-description">
+            Will execute {{ stressTestOps }} {{ stressTestConsistency === 'ALL' ? 'sequential' : 'concurrent' }} INSERT operations with <strong>{{ stressTestConsistency }}</strong> consistency
+          </p>
+          <p v-if="stressTestConsistency === 'ALL'" class="consistency-warning">
+            ALL consistency runs operations one at a time (not concurrently) because each write waits for all 3 replicas to confirm. This demonstrates the latency tradeoff for maximum durability.
           </p>
         </div>
 
-        <!-- Test Results -->
-        <div v-if="stressTestResult" class="stress-test-results">
-          <h4 class="mb-3">📊 {{ stressTestResult.test_name }} Results</h4>
+        <!-- Live Test Progress -->
+        <div v-if="stressTestRunning" class="live-progress">
+          <div class="progress-header">
+            <h4>Test In Progress</h4>
+            <span class="elapsed-time">{{ elapsedTime }}s</span>
+          </div>
           
-          <!-- Summary Cards -->
-          <div class="grid grid-4 mb-3">
-            <div class="result-card">
-              <div class="result-value">{{ stressTestResult.throughput_ops_per_sec }}</div>
-              <div class="result-label">ops/sec</div>
+          <div class="progress-bar-container">
+            <div class="progress-bar-fill" :style="{ width: progressPercent + '%' }"></div>
+          </div>
+          
+          <div class="live-stats">
+            <div class="live-stat">
+              <div class="live-stat-value">{{ liveStats.completed }}</div>
+              <div class="live-stat-label">Completed</div>
             </div>
-            <div class="result-card">
-              <div class="result-value">{{ stressTestResult.avg_latency_ms }}ms</div>
-              <div class="result-label">avg latency</div>
+            <div class="live-stat">
+              <div class="live-stat-value">{{ liveStats.successful }}</div>
+              <div class="live-stat-label">Successful</div>
             </div>
-            <div class="result-card success">
-              <div class="result-value">{{ stressTestResult.successful }}/{{ stressTestResult.total_operations }}</div>
-              <div class="result-label">successful</div>
+            <div class="live-stat">
+              <div class="live-stat-value">{{ liveStats.failed }}</div>
+              <div class="live-stat-label">Failed</div>
             </div>
-            <div class="result-card">
-              <div class="result-value">{{ stressTestResult.duration_seconds }}s</div>
-              <div class="result-label">duration</div>
+            <div class="live-stat">
+              <div class="live-stat-value">{{ liveStats.avgLatency }}ms</div>
+              <div class="live-stat-label">Avg Latency</div>
             </div>
           </div>
 
-          <!-- Detailed Stats -->
-          <DataTable :value="[stressTestResult]" class="mb-3">
-            <Column field="consistency_level" header="Consistency">
-              <template #body="slotProps">
-                <Tag :severity="getConsistencySeverity(slotProps.data.consistency_level)">
-                  {{ slotProps.data.consistency_level }}
-                </Tag>
-              </template>
-            </Column>
-            <Column field="min_latency_ms" header="Min Latency">
-              <template #body="slotProps">{{ slotProps.data.min_latency_ms }}ms</template>
-            </Column>
-            <Column field="max_latency_ms" header="Max Latency">
-              <template #body="slotProps">{{ slotProps.data.max_latency_ms }}ms</template>
-            </Column>
-            <Column field="failed" header="Failed">
-              <template #body="slotProps">
-                <Tag :severity="slotProps.data.failed > 0 ? 'danger' : 'success'">
-                  {{ slotProps.data.failed }}
-                </Tag>
-              </template>
-            </Column>
-          </DataTable>
+          <div class="operation-log">
+            <h5>Recent Operations</h5>
+            <div class="log-entries">
+              <div v-for="(entry, i) in recentOperations" :key="i" class="log-entry" :class="entry.success ? 'success' : 'failure'">
+                <span class="log-time">{{ entry.time }}</span>
+                <span class="log-message">{{ entry.message }}</span>
+                <span class="log-latency">{{ entry.latency }}ms</span>
+              </div>
+            </div>
+          </div>
+        </div>
 
-          <!-- Timestamp Range (for writes) -->
-          <div v-if="stressTestResult.timestamp_range" class="metric-card mb-3">
-            <div class="metric-label">Timestamp Range (proves ordering)</div>
-            <div class="metric-value">
-              {{ stressTestResult.timestamp_range.min }} → {{ stressTestResult.timestamp_range.max }}
-              <Tag severity="success" class="ml-2">Sequential ✓</Tag>
+        <!-- Test Results -->
+        <div v-if="stressTestResult && !stressTestRunning" class="test-results">
+          <div class="results-header">
+            <h4>Test Complete</h4>
+            <span class="result-badge" :class="stressTestResult.failed === 0 ? 'success' : 'partial'">
+              {{ stressTestResult.failed === 0 ? 'All Passed' : 'Some Failures' }}
+            </span>
+          </div>
+
+          <!-- Key Metrics -->
+          <div class="key-metrics">
+            <div class="key-metric">
+              <div class="metric-icon throughput"></div>
+              <div class="metric-data">
+                <div class="metric-value">{{ stressTestResult.throughput_ops_per_sec }}</div>
+                <div class="metric-label">Operations/Second</div>
+                <div class="metric-context">Higher = better system performance</div>
+              </div>
+            </div>
+            <div class="key-metric">
+              <div class="metric-icon latency"></div>
+              <div class="metric-data">
+                <div class="metric-value">{{ stressTestResult.avg_latency_ms }}ms</div>
+                <div class="metric-label">Average Latency</div>
+                <div class="metric-context">Time for write to complete</div>
+              </div>
+            </div>
+            <div class="key-metric">
+              <div class="metric-icon success"></div>
+              <div class="metric-data">
+                <div class="metric-value">{{ stressTestResult.successful }}/{{ stressTestResult.total_operations }}</div>
+                <div class="metric-label">Success Rate</div>
+                <div class="metric-context">{{ ((stressTestResult.successful / stressTestResult.total_operations) * 100).toFixed(1) }}% successful</div>
+              </div>
+            </div>
+            <div class="key-metric">
+              <div class="metric-icon time"></div>
+              <div class="metric-data">
+                <div class="metric-value">{{ stressTestResult.duration_seconds }}s</div>
+                <div class="metric-label">Total Duration</div>
+                <div class="metric-context">Time to complete all ops</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Latency Distribution -->
+          <div class="latency-section">
+            <h5>Latency Distribution</h5>
+            <div class="latency-bars">
+              <div class="latency-bar">
+                <div class="bar-label">Min</div>
+                <div class="bar-visual">
+                  <div class="bar-fill min" :style="{ width: getLatencyBarWidth(stressTestResult.min_latency_ms) }"></div>
+                </div>
+                <div class="bar-value">{{ stressTestResult.min_latency_ms }}ms</div>
+              </div>
+              <div class="latency-bar">
+                <div class="bar-label">Avg</div>
+                <div class="bar-visual">
+                  <div class="bar-fill avg" :style="{ width: getLatencyBarWidth(stressTestResult.avg_latency_ms) }"></div>
+                </div>
+                <div class="bar-value">{{ stressTestResult.avg_latency_ms }}ms</div>
+              </div>
+              <div class="latency-bar">
+                <div class="bar-label">Max</div>
+                <div class="bar-visual">
+                  <div class="bar-fill max" :style="{ width: getLatencyBarWidth(stressTestResult.max_latency_ms) }"></div>
+                </div>
+                <div class="bar-value">{{ stressTestResult.max_latency_ms }}ms</div>
+              </div>
+            </div>
+            <div class="latency-explanation">
+              <p v-if="stressTestConsistency === 'ONE'">
+                <strong>ONE consistency:</strong> Fast because we only wait for the master to confirm. 
+                Replicas receive the write via binlog replication asynchronously.
+              </p>
+              <p v-else-if="stressTestConsistency === 'QUORUM'">
+                <strong>QUORUM consistency:</strong> Moderate latency because we wait for 2 out of 3 replicas 
+                to confirm they've received the write before returning success.
+              </p>
+              <p v-else>
+                <strong>ALL consistency:</strong> Highest latency because we wait for all 3 replicas to confirm. 
+                This ensures maximum durability but reduces availability.
+              </p>
+            </div>
+          </div>
+
+          <!-- Timestamp Verification -->
+          <div v-if="stressTestResult.timestamp_range" class="timestamp-section">
+            <h5>Timestamp Ordering Verification</h5>
+            <div class="timestamp-content">
+              <div class="timestamp-visual">
+                <div class="ts-start">
+                  <span class="ts-label">First</span>
+                  <span class="ts-value">{{ stressTestResult.timestamp_range.min }}</span>
+                </div>
+                <div class="ts-arrow">
+                  <div class="arrow-line"></div>
+                  <span class="arrow-label">{{ stressTestResult.total_operations }} operations</span>
+                </div>
+                <div class="ts-end">
+                  <span class="ts-label">Last</span>
+                  <span class="ts-value">{{ stressTestResult.timestamp_range.max }}</span>
+                </div>
+              </div>
+              <p class="timestamp-explanation">
+                Each write received a unique, monotonically increasing timestamp from our distributed timestamp services.
+                This ensures global ordering even with concurrent writes from multiple clients.
+              </p>
             </div>
           </div>
 
           <!-- Errors if any -->
-          <div v-if="stressTestResult.errors" class="mt-3">
-            <Message severity="warn" :closable="false">
-              <div class="font-semibold mb-2">Errors encountered:</div>
-              <div v-for="(count, error) in stressTestResult.errors" :key="error" class="text-sm">
-                • {{ error }}: {{ count }} occurrences
+          <div v-if="stressTestResult.errors && Object.keys(stressTestResult.errors).length > 0" class="errors-section">
+            <h5>Errors Encountered</h5>
+            <div class="error-list">
+              <div v-for="(count, error) in stressTestResult.errors" :key="error" class="error-item">
+                <span class="error-count">{{ count }}x</span>
+                <span class="error-message">{{ error }}</span>
               </div>
-            </Message>
+            </div>
+          </div>
+
+          <!-- What Happened -->
+          <div class="what-happened">
+            <h5>What Just Happened?</h5>
+            <ol class="step-list">
+              <li v-if="stressTestConsistency === 'ALL'">
+                <strong>{{ stressTestResult.total_operations }} INSERT requests</strong> were sent sequentially (one at a time) to the coordinator
+              </li>
+              <li v-else>
+                <strong>{{ stressTestResult.total_operations }} concurrent INSERT requests</strong> were sent to the coordinator
+              </li>
+              <li>
+                Each request received a <strong>unique timestamp</strong> from the timestamp service
+              </li>
+              <li>
+                Writes were executed on the <strong>master MySQL instance</strong>
+              </li>
+              <li v-if="stressTestConsistency === 'ONE'">
+                With ONE consistency, we returned success immediately after master confirmed
+              </li>
+              <li v-else-if="stressTestConsistency === 'QUORUM'">
+                With QUORUM, we waited for <strong>2 of 3 replicas</strong> to catch up via binlog replication
+              </li>
+              <li v-else>
+                With ALL, we waited for <strong>all 3 replicas</strong> to confirm before proceeding to the next write (this is why it's slower)
+              </li>
+              <li>
+                Data now exists on master and is being replicated to all replicas
+              </li>
+            </ol>
           </div>
         </div>
 
-        <!-- Consistency Comparison Results -->
-        <div v-if="consistencyComparisonResult" class="stress-test-results">
-          <h4 class="mb-3">📊 Consistency Level Comparison</h4>
-          
-          <!-- Summary -->
-          <div class="grid grid-3 mb-3">
-            <div class="result-card">
-              <div class="result-value">{{ consistencyComparisonResult.summary.fastest }}</div>
-              <div class="result-label">Fastest</div>
-            </div>
-            <div class="result-card success">
-              <div class="result-value">{{ consistencyComparisonResult.summary.most_reliable }}</div>
-              <div class="result-label">Most Reliable</div>
-            </div>
-            <div class="result-card">
-              <div class="result-value">{{ consistencyComparisonResult.summary.highest_throughput }}</div>
-              <div class="result-label">Highest Throughput</div>
+        <!-- Cumulative Stats -->
+        <div v-if="consistencyMetricsArray.some(m => m.count > 0)" class="cumulative-stats">
+          <h4>Session Statistics</h4>
+          <p class="stats-subtitle">Aggregated from all operations since last clear</p>
+          <div class="stats-grid">
+            <div v-for="metric in consistencyMetricsArray" :key="metric.level" class="stat-card" :class="metric.level.toLowerCase()">
+              <div class="stat-header">
+                <span class="stat-level">{{ metric.level }}</span>
+                <span class="stat-count">{{ metric.count }} ops</span>
+              </div>
+              <div class="stat-body">
+                <div class="stat-row">
+                  <span>Avg Latency</span>
+                  <span>{{ metric.avg_latency_ms.toFixed(1) }}ms</span>
+                </div>
+                <div class="stat-row">
+                  <span>Success Rate</span>
+                  <span :class="{ 'good': metric.success_rate >= 95 }">{{ metric.success_rate.toFixed(1) }}%</span>
+                </div>
+                <div class="stat-row" v-if="metric.failures > 0">
+                  <span>Failures</span>
+                  <span class="bad">{{ metric.failures }}</span>
+                </div>
+              </div>
             </div>
           </div>
-
-          <!-- Comparison Table -->
-          <DataTable :value="consistencyComparisonArray">
-            <Column field="level" header="Level">
-              <template #body="slotProps">
-                <Tag :severity="getConsistencySeverity(slotProps.data.level)">
-                  {{ slotProps.data.level }}
-                </Tag>
-              </template>
-            </Column>
-            <Column field="successful" header="Success">
-              <template #body="slotProps">
-                <Tag :severity="slotProps.data.successful === slotProps.data.total ? 'success' : 'warning'">
-                  {{ slotProps.data.successful }}/{{ slotProps.data.total }}
-                </Tag>
-              </template>
-            </Column>
-            <Column field="avg_latency_ms" header="Avg Latency">
-              <template #body="slotProps">
-                <Tag :severity="getLatencySeverity(slotProps.data.avg_latency_ms)">
-                  {{ slotProps.data.avg_latency_ms }}ms
-                </Tag>
-              </template>
-            </Column>
-            <Column field="throughput_ops_per_sec" header="Throughput">
-              <template #body="slotProps">{{ slotProps.data.throughput_ops_per_sec }} ops/s</template>
-            </Column>
-            <Column field="duration_seconds" header="Duration">
-              <template #body="slotProps">{{ slotProps.data.duration_seconds }}s</template>
-            </Column>
-          </DataTable>
         </div>
       </div>
-    </Panel>
+    </section>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import ProgressBar from 'primevue/progressbar'
 
 const API_BASE = 'http://localhost:9000'
 
-// State
+// Service Status State
 const services = ref([
   { name: 'Coordinator', port: 9000, healthy: false, role: 'API Gateway' },
-  { name: 'MySQL Instance 1', port: 3306, healthy: false, role: 'Master (Binlog Source)' },
-  { name: 'MySQL Instance 2', port: 3307, healthy: false, role: 'Replica (Binlog Consumer)' },
-  { name: 'MySQL Instance 3', port: 3308, healthy: false, role: 'Replica (Binlog Consumer)' },
-  { name: 'MySQL Instance 4', port: 3309, healthy: false, role: 'Replica (Binlog Consumer)' },
+  { name: 'MySQL Instance 1', port: 3306, healthy: false, role: 'Master/Replica' },
+  { name: 'MySQL Instance 2', port: 3307, healthy: false, role: 'Replica' },
+  { name: 'MySQL Instance 3', port: 3308, healthy: false, role: 'Replica' },
+  { name: 'MySQL Instance 4', port: 3309, healthy: false, role: 'Replica' },
   { name: 'Timestamp Service 1', port: 9001, healthy: false, role: 'Odd Timestamps' },
   { name: 'Timestamp Service 2', port: 9002, healthy: false, role: 'Even Timestamps' },
   { name: 'Metrics Collector', port: 9003, healthy: false, role: 'Monitoring' },
@@ -504,44 +520,63 @@ const services = ref([
   { name: 'SEER Service', port: 9005, healthy: false, role: 'Leader Election' },
 ])
 
+// Cluster Topology State
 const metrics = ref<any[]>([])
 const masterTimestamp = ref<number>(0)
-const loadingMetrics = ref(false)
-const query = ref('SELECT * FROM users')
-const executing = ref(false)
-const executionFlow = ref<any[]>([])
-const failoverFlow = ref<any[]>([])
-const queryResult = ref<any>(null)
 const systemStatus = ref<any>({})
-const masterRunning = ref(true)
+
+// Failover State
 const failoverInProgress = ref(false)
 const electionInProgress = ref(false)
-const recoveryCountdown = ref(0)
+const failoverFlow = ref<any[]>([])
 const failoverResult = ref<any>(null)
-const consistencyLevel = ref('QUORUM')
-const consistencyMetrics = ref<any>({})
-const consistencyMetricsArray = ref<any[]>([])
-const loadingConsistencyMetrics = ref(false)
 
-// Stress test state
+// Stress Test State
 const stressTestRunning = ref<string | null>(null)
 const stressTestOps = ref(50)
 const stressTestConsistency = ref('QUORUM')
 const stressTestResult = ref<any>(null)
-const consistencyComparisonResult = ref<any>(null)
-const consistencyComparisonArray = ref<any[]>([])
 const dataCount = ref({ users: 0, products: 0, total: 0 })
 const clearingData = ref(false)
+const consistencyMetricsArray = ref<any[]>([])
+
+// Live progress state
+const elapsedTime = ref(0)
+const progressPercent = ref(0)
+const liveStats = ref({ completed: 0, successful: 0, failed: 0, avgLatency: 0 })
+const recentOperations = ref<any[]>([])
+let progressTimer: any = null
 
 const consistencyOptions = [
-  { label: 'ONE', value: 'ONE', description: 'Fastest - Eventual Consistency' },
-  { label: 'QUORUM', value: 'QUORUM', description: 'Balanced - Strong Consistency' },
-  { label: 'ALL', value: 'ALL', description: 'Strongest - All Nodes' }
+  { label: 'ONE - Eventual', value: 'ONE', shortDesc: 'Fast, async replication' },
+  { label: 'QUORUM - Strong', value: 'QUORUM', shortDesc: '2/3 replicas confirm' },
+  { label: 'ALL - Strongest', value: 'ALL', shortDesc: 'All 3 must confirm (slow)' }
 ]
 
 let refreshInterval: any = null
 
-// Methods
+// Helper functions
+const getLatencyClass = (latency: number) => {
+  if (latency < 20) return 'good'
+  if (latency < 50) return 'warning'
+  return 'bad'
+}
+
+const getLagClass = (lag: number) => {
+  if (lag === 0) return 'good'
+  if (lag < 5) return 'warning'
+  return 'bad'
+}
+
+const formatUptime = (seconds: number) => {
+  if (seconds < 60) return `${seconds.toFixed(0)}s`
+  if (seconds < 3600) return `${(seconds / 60).toFixed(1)}m`
+  return `${(seconds / 3600).toFixed(1)}h`
+}
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+// Data fetching functions
 const checkServiceHealth = async () => {
   const healthChecks = [
     { index: 0, url: `${API_BASE}/health` },
@@ -554,39 +589,26 @@ const checkServiceHealth = async () => {
     try {
       const response = await fetch(check.url)
       const service = services.value[check.index]
-      if (service) {
-        service.healthy = response.ok
-      }
+      if (service) service.healthy = response.ok
     } catch {
       const service = services.value[check.index]
-      if (service) {
-        service.healthy = false
-      }
+      if (service) service.healthy = false
     }
   }
 
-  // Check timestamp services health via coordinator
   const coordinator = services.value[0]
   if (coordinator?.healthy) {
-    // Timestamp services are healthy if coordinator is up
-    const timestampService1 = services.value[5]
-    const timestampService2 = services.value[6]
-    if (timestampService1) timestampService1.healthy = true
-    if (timestampService2) timestampService2.healthy = true
+    const ts1 = services.value[5]
+    const ts2 = services.value[6]
+    if (ts1) ts1.healthy = true
+    if (ts2) ts2.healthy = true
   }
 
-  // Get MySQL instance health from metrics collector
   try {
     const metricsResponse = await fetch('http://localhost:9003/metrics')
     if (metricsResponse.ok) {
       const metricsData = await metricsResponse.json()
       const replicas = metricsData.replicas || []
-      
-      // Map instance IDs to service indices
-      // services[1] = MySQL Instance 1 (instance-1)
-      // services[2] = MySQL Instance 2 (instance-2)
-      // services[3] = MySQL Instance 3 (instance-3)
-      // services[4] = MySQL Instance 4 (instance-4)
       
       const instanceToIndex: Record<string, number> = {
         'instance-1': 1,
@@ -595,42 +617,30 @@ const checkServiceHealth = async () => {
         'instance-4': 4
       }
       
-      // First, set all MySQL instances to unhealthy by default
       for (let i = 1; i <= 4; i++) {
         const service = services.value[i]
-        if (service) {
-          service.healthy = false
-        }
+        if (service) service.healthy = false
       }
       
-      // Update health status based on metrics from metrics-collector
-      // This now includes all 4 instances (instance-1 through instance-4)
       for (const replica of replicas) {
         const index = instanceToIndex[replica.replica_id]
         if (index !== undefined) {
           const service = services.value[index]
-          if (service) {
-            service.healthy = replica.is_healthy
-          }
+          if (service) service.healthy = replica.is_healthy
         }
       }
     }
   } catch (error) {
-    console.error('Failed to get MySQL health from metrics:', error)
-    // If metrics collector is down, fall back to assuming MySQL is healthy if coordinator is up
     if (coordinator?.healthy) {
       for (let i = 1; i <= 4; i++) {
         const service = services.value[i]
-        if (service) {
-          service.healthy = true
-        }
+        if (service) service.healthy = true
       }
     }
   }
 }
 
 const fetchMetrics = async () => {
-  loadingMetrics.value = true
   try {
     const response = await fetch('http://localhost:9003/metrics')
     const data = await response.json()
@@ -638,8 +648,6 @@ const fetchMetrics = async () => {
     masterTimestamp.value = data.master_timestamp
   } catch (error) {
     console.error('Failed to fetch metrics:', error)
-  } finally {
-    loadingMetrics.value = false
   }
 }
 
@@ -647,230 +655,35 @@ const fetchSystemStatus = async () => {
   try {
     const response = await fetch(`${API_BASE}/status`)
     systemStatus.value = await response.json()
-    // Check if current master is instance-1 (original master)
-    masterRunning.value = systemStatus.value.current_master?.id === 'instance-1'
   } catch (error) {
     console.error('Failed to fetch system status:', error)
   }
 }
 
 const fetchConsistencyMetrics = async () => {
-  loadingConsistencyMetrics.value = true
   try {
     const response = await fetch(`${API_BASE}/consistency-metrics`)
     const data = await response.json()
-    consistencyMetrics.value = data
-    
-    // Convert to array for DataTable
     consistencyMetricsArray.value = Object.keys(data).map(level => ({
       level,
       ...data[level]
     }))
   } catch (error) {
     console.error('Failed to fetch consistency metrics:', error)
-  } finally {
-    loadingConsistencyMetrics.value = false
   }
 }
 
-const getConsistencySeverity = (level: string) => {
-  switch (level) {
-    case 'ONE': return 'success'
-    case 'QUORUM': return 'info'
-    case 'ALL': return 'warning'
-    default: return 'secondary'
-  }
-}
-
-const getConsistencyDescription = (level: string) => {
-  switch (level) {
-    case 'ONE': return 'Fastest - Eventual Consistency'
-    case 'QUORUM': return 'Balanced - Strong Consistency'
-    case 'ALL': return 'Strongest - All Nodes'
-    default: return ''
-  }
-}
-
-const getLatencySeverity = (latency: number) => {
-  if (latency < 20) return 'success'
-  if (latency < 50) return 'info'
-  return 'warning'
-}
-
-const executeQuery = async () => {
-  executing.value = true
-  executionFlow.value = []
-  queryResult.value = null
-
+const fetchDataCount = async () => {
   try {
-    // Show execution flow
-    executionFlow.value.push({
-      title: 'Parsing Query',
-      detail: `Query type: ${query.value.trim().split(' ')[0]}`
-    })
-
-    const response = await fetch(`${API_BASE}/query`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        query: query.value,
-        consistency: consistencyLevel.value 
-      })
-    })
-
-    const result = await response.json()
-
-    if (result.timestamp) {
-      executionFlow.value.push({
-        title: 'Timestamp Assigned',
-        detail: `Timestamp: ${result.timestamp}`
-      })
-    }
-
-    executionFlow.value.push({
-      title: 'Query Executed',
-      detail: `Executed on: ${result.executed_on}`
-    })
-
-    if (result.message.includes('quorum')) {
-      const quorumMatch = result.message.match(/quorum: (\d+\/\d+)/)
-      if (quorumMatch) {
-        executionFlow.value.push({
-          title: 'Quorum Achieved',
-          detail: `Replicas confirmed: ${quorumMatch[1]}`
-        })
-      }
-    }
-
-    queryResult.value = result
-    await fetchMetrics()
-    await fetchSystemStatus()
-    await fetchConsistencyMetrics()
-  } catch (error: any) {
-    queryResult.value = {
-      success: false,
-      message: `Error: ${error.message}`
-    }
-  } finally {
-    executing.value = false
-  }
-}
-
-const insertSampleData = () => {
-  const names = ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve']
-  const name = names[Math.floor(Math.random() * names.length)] || 'User'
-  const email = `${name.toLowerCase()}@example.com`
-  query.value = `INSERT INTO users (name, email) VALUES ("${name}", "${email}")`
-  executeQuery()
-}
-
-const getQuorum = async () => {
-  executionFlow.value = []
-  try {
-    const response = await fetch('http://localhost:9004/select-quorum', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ operation: 'write' })
-    })
+    const response = await fetch(`${API_BASE}/admin/stress-test/data-count`)
     const data = await response.json()
-    
-    executionFlow.value.push({
-      title: 'Cabinet Algorithm Executed',
-      detail: `Selected quorum: ${data.quorum.join(', ')}`
-    })
-    
-    executionFlow.value.push({
-      title: 'Quorum Size',
-      detail: `${data.quorum_size} out of ${data.total_replicas} replicas`
-    })
-
-    queryResult.value = {
-      success: true,
-      message: `Quorum selected: ${data.quorum.join(', ')}`
-    }
-  } catch (error: any) {
-    queryResult.value = {
-      success: false,
-      message: `Error: ${error.message}`
-    }
+    dataCount.value = data
+  } catch (error) {
+    console.error('Failed to fetch data count:', error)
   }
 }
 
-const electLeader = async () => {
-  executionFlow.value = []
-  executing.value = true
-  queryResult.value = null
-  
-  try {
-    // First call SEER to elect leader
-    executionFlow.value.push({
-      title: 'Calling SEER Algorithm',
-      detail: 'Analyzing replicas to select optimal leader...'
-    })
-    
-    const seerResponse = await fetch('http://localhost:9005/elect-leader', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
-    })
-    const seerData = await seerResponse.json()
-    
-    executionFlow.value.push({
-      title: 'SEER Algorithm Executed',
-      detail: `Elected leader: ${seerData.leader_id}`
-    })
-
-    executionFlow.value.push({
-      title: 'Leader Score',
-      detail: `Score: ${seerData.score.toFixed(3)} (latency: ${seerData.latency_ms.toFixed(2)}ms, lag: ${seerData.replication_lag})`
-    })
-
-    // Now trigger failover through coordinator to actually update the system
-    executionFlow.value.push({
-      title: 'Updating System Configuration',
-      detail: `Promoting ${seerData.leader_id} to master...`
-    })
-    
-    const failoverResponse = await fetch(`${API_BASE}/admin/trigger-failover`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ new_leader: seerData.leader_id })
-    })
-    
-    const failoverData = await failoverResponse.json()
-    
-    if (failoverData.success) {
-      executionFlow.value.push({
-        title: 'System Updated',
-        detail: `Master changed from ${failoverData.old_master} to ${failoverData.new_master}`
-      })
-      
-      queryResult.value = {
-        success: true,
-        message: `Leader elected and system updated: ${seerData.leader_id} is now the master with score ${seerData.score.toFixed(3)}`
-      }
-    } else {
-      queryResult.value = {
-        success: true,
-        message: `Leader elected: ${seerData.leader_id} with score ${seerData.score.toFixed(3)} (Note: System failover may require manual trigger)`
-      }
-    }
-    
-    // Refresh system status and metrics after electing leader
-    setTimeout(async () => {
-      await fetchSystemStatus()
-      await fetchMetrics()
-    }, 1500)
-  } catch (error: any) {
-    queryResult.value = {
-      success: false,
-      message: `Error: ${error.message}`
-    }
-  } finally {
-    executing.value = false
-  }
-}
-
+// Failover functions
 const electLeaderOnly = async () => {
   failoverFlow.value = []
   electionInProgress.value = true
@@ -878,8 +691,8 @@ const electLeaderOnly = async () => {
   
   try {
     failoverFlow.value.push({
-      title: 'Calling SEER Algorithm',
-      detail: 'Analyzing replicas to select optimal leader...'
+      title: 'Initiating SEER Algorithm',
+      detail: 'Analyzing replicas to select optimal leader based on latency, lag, and stability...'
     })
     
     const seerResponse = await fetch('http://localhost:9005/elect-leader', {
@@ -890,13 +703,13 @@ const electLeaderOnly = async () => {
     const seerData = await seerResponse.json()
     
     failoverFlow.value.push({
-      title: 'SEER Algorithm Executed',
-      detail: `Elected leader: ${seerData.leader_id} (Score: ${seerData.score.toFixed(3)})`
+      title: 'Leader Selected',
+      detail: `${seerData.leader_id} chosen with score ${seerData.score.toFixed(3)} (latency: ${seerData.latency_ms.toFixed(2)}ms, lag: ${seerData.replication_lag})`
     })
 
     failoverFlow.value.push({
       title: 'Promoting New Leader',
-      detail: `${seerData.leader_id} → Master, Current master → Replica`
+      detail: `Promoting ${seerData.leader_id} to master, demoting current master to replica`
     })
     
     const failoverResponse = await fetch(`${API_BASE}/admin/trigger-failover`, {
@@ -910,12 +723,12 @@ const electLeaderOnly = async () => {
     if (failoverData.success) {
       failoverFlow.value.push({
         title: 'Failover Complete',
-        detail: `${failoverData.old_master} → ${failoverData.new_master}`
+        detail: `New master: ${failoverData.new_master}, Old master ${failoverData.old_master} is now a replica`
       })
       
       failoverResult.value = {
         success: true,
-        message: `Graceful failover complete! New master: ${failoverData.new_master}`
+        message: `Graceful failover complete. New master: ${failoverData.new_master}`
       }
     } else {
       failoverResult.value = {
@@ -938,9 +751,6 @@ const electLeaderOnly = async () => {
   }
 }
 
-// Helper function for delays
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
-
 const stopMaster = async () => {
   failoverInProgress.value = true
   failoverFlow.value = []
@@ -948,13 +758,11 @@ const stopMaster = async () => {
   
   try {
     const oldMasterId = systemStatus.value.current_master?.id || 'instance-1'
-    const oldMasterHost = systemStatus.value.current_master?.host || 'mysql-instance-1'
     const oldMasterContainer = systemStatus.value.current_master?.container || 'mysql-instance-1'
     
-    // Step 1: Stop the master container
     failoverFlow.value.push({
-      title: 'Step 1: Stopping Master Container',
-      detail: `Executing: docker stop ${oldMasterContainer}`
+      title: 'Stopping Master Container',
+      detail: `Executing docker stop ${oldMasterContainer}`
     })
     
     const stopResponse = await fetch(`${API_BASE}/admin/stop-master-only`, {
@@ -970,42 +778,36 @@ const stopMaster = async () => {
     }
     
     failoverFlow.value.push({
-      title: 'Step 2: Master Stopped',
+      title: 'Master Stopped',
       detail: `Container ${oldMasterContainer} is now down`
     })
     
     await sleep(2000)
     
-    // Step 2: Call SEER to elect new leader (exclude the stopped master)
     failoverFlow.value.push({
-      title: 'Step 3: Calling SEER Algorithm',
+      title: 'Running SEER Election',
       detail: 'Analyzing remaining replicas to select optimal leader...'
     })
     
     const seerResponse = await fetch('http://localhost:9005/elect-leader', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        exclude_replicas: [oldMasterId]  // Exclude the stopped master from election
-      })
+      body: JSON.stringify({ exclude_replicas: [oldMasterId] })
     })
     
-    if (!seerResponse.ok) {
-      throw new Error('SEER election failed')
-    }
+    if (!seerResponse.ok) throw new Error('SEER election failed')
     
     const seerData = await seerResponse.json()
     
     failoverFlow.value.push({
-      title: 'Step 4: SEER Elected New Leader',
-      detail: `Elected: ${seerData.leader_id} (Score: ${seerData.score.toFixed(3)}, Latency: ${seerData.latency_ms.toFixed(2)}ms, Lag: ${seerData.replication_lag})`
+      title: 'New Leader Elected',
+      detail: `${seerData.leader_id} selected with score ${seerData.score.toFixed(3)}`
     })
     
     await sleep(1000)
     
-    // Step 3: Promote the elected leader
     failoverFlow.value.push({
-      title: 'Step 5: Promoting New Leader',
+      title: 'Promoting New Leader',
       detail: `Promoting ${seerData.leader_id} to master...`
     })
     
@@ -1015,9 +817,7 @@ const stopMaster = async () => {
       body: JSON.stringify({ new_leader: seerData.leader_id })
     })
     
-    if (!failoverResponse.ok) {
-      throw new Error('Failover promotion failed')
-    }
+    if (!failoverResponse.ok) throw new Error('Failover promotion failed')
     
     const failoverData = await failoverResponse.json()
     
@@ -1026,20 +826,17 @@ const stopMaster = async () => {
     }
     
     failoverFlow.value.push({
-      title: 'Step 6: New Master Promoted',
+      title: 'New Master Active',
       detail: `${failoverData.new_master} is now the master`
     })
     
-    // Update UI to show new topology
     await fetchSystemStatus()
     await fetchMetrics()
-    
     await sleep(3000)
     
-    // Step 4: Restart old master as replica
     failoverFlow.value.push({
-      title: 'Step 7: Restarting Old Master',
-      detail: `Starting ${oldMasterContainer} container and configuring as replica...`
+      title: 'Restarting Old Master',
+      detail: `Starting ${oldMasterContainer} and configuring as replica...`
     })
     
     const restartResponse = await fetch(`${API_BASE}/admin/start-instance`, {
@@ -1048,28 +845,15 @@ const stopMaster = async () => {
       body: JSON.stringify({ instance_id: oldMasterId })
     })
     
-    if (!restartResponse.ok) {
-      throw new Error('Failed to restart old master')
-    }
+    if (!restartResponse.ok) throw new Error('Failed to restart old master')
     
     const restartData = await restartResponse.json()
     
     failoverFlow.value.push({
-      title: 'Step 8: Old Master Restarted',
-      detail: `Container ${oldMasterContainer} is running and healthy`
+      title: 'Recovery Complete',
+      detail: `${oldMasterId} is now replicating from ${restartData.current_master.id}. Total replicas: ${restartData.total_replicas}`
     })
     
-    failoverFlow.value.push({
-      title: 'Step 9: Configured as Replica',
-      detail: `${oldMasterId} is now replicating from ${restartData.current_master.id}`
-    })
-    
-    failoverFlow.value.push({
-      title: 'Step 10: Failover Complete',
-      detail: `New master: ${restartData.current_master.id}, Total replicas: ${restartData.total_replicas}`
-    })
-    
-    // Update system status with final state
     systemStatus.value = {
       current_master: restartData.current_master,
       current_replicas: restartData.current_replicas,
@@ -1079,12 +863,9 @@ const stopMaster = async () => {
     
     failoverResult.value = {
       success: true,
-      message: `Complete failover with recovery! New master: ${restartData.current_master.id}, Old master ${oldMasterId} recovered as replica.`
+      message: `Complete failover with recovery. New master: ${restartData.current_master.id}, old master ${oldMasterId} recovered as replica.`
     }
     
-    masterRunning.value = true
-    
-    // Final refresh to ensure UI is in sync
     await sleep(2000)
     await fetchSystemStatus()
     await fetchMetrics()
@@ -1104,199 +885,10 @@ const stopMaster = async () => {
   }
 }
 
-const startAutoRecovery = () => {
-  recoveryCountdown.value = 10
-  
-  const countdownInterval = setInterval(() => {
-    recoveryCountdown.value--
-    if (recoveryCountdown.value <= 0) {
-      clearInterval(countdownInterval)
-      performAutoRecovery()
-    }
-  }, 1000)
-}
-
-const performAutoRecovery = async () => {
-  failoverFlow.value.push({
-    title: 'Auto-Recovery Started',
-    detail: 'Restarting old master as replica...'
-  })
-  
-  try {
-    const response = await fetch(`${API_BASE}/admin/restart-old-master`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    })
-    
-    const result = await response.json()
-    
-    if (result.success) {
-      failoverFlow.value.push({
-        title: 'Auto-Recovery Complete',
-        detail: 'Old master restarted and configured as replica'
-      })
-      
-      failoverResult.value = {
-        success: true,
-        message: 'Failover and auto-recovery complete! Old master is now a replica.'
-      }
-    } else {
-      failoverFlow.value.push({
-        title: 'Auto-Recovery Failed',
-        detail: result.error || 'Use Manual Recovery button'
-      })
-      
-      failoverResult.value = {
-        success: false,
-        message: `Auto-recovery failed: ${result.error || result.message}. Try Manual Recovery.`
-      }
-    }
-  } catch (error: any) {
-    failoverFlow.value.push({
-      title: 'Auto-Recovery Failed',
-      detail: error.message
-    })
-    
-    failoverResult.value = {
-      success: false,
-      message: `Auto-recovery failed: ${error.message}. Try Manual Recovery.`
-    }
-  } finally {
-    failoverInProgress.value = false
-    masterRunning.value = true
-    
-    // Refresh status
-    setTimeout(async () => {
-      await fetchSystemStatus()
-      await fetchMetrics()
-    }, 3000)
-  }
-}
-
-const startMaster = async () => {
-  executing.value = true
-  executionFlow.value = []
-  queryResult.value = null
-  
-  try {
-    executionFlow.value.push({
-      title: 'Restarting Old Master as Replica',
-      detail: 'Starting mysql-instance-1 and configuring binlog replication'
-    })
-    
-    const response = await fetch(`${API_BASE}/admin/restart-old-master`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    })
-    
-    const result = await response.json()
-    
-    if (result.success) {
-      executionFlow.value.push({
-        title: 'Old Master Restarted',
-        detail: 'Container started and configured as replica. Binlog replication active.'
-      })
-      
-      queryResult.value = {
-        success: true,
-        message: result.message || 'Old master restarted as replica successfully.'
-      }
-      
-      masterRunning.value = true
-      
-      // Refresh status after a delay
-      setTimeout(async () => {
-        await fetchSystemStatus()
-        await fetchMetrics()
-      }, 3000)
-    } else {
-      queryResult.value = {
-        success: false,
-        message: `Failed to restart old master: ${result.error || result.message}`
-      }
-    }
-  } catch (error: any) {
-    queryResult.value = {
-      success: false,
-      message: `Error: ${error.message}`
-    }
-  } finally {
-    executing.value = false
-  }
-}
-
-
-const triggerFailover = async () => {
-  executing.value = true
-  executionFlow.value = []
-  queryResult.value = null
-  
-  try {
-    executionFlow.value.push({
-      title: 'Triggering Manual Failover',
-      detail: 'Electing new leader using SEER algorithm...'
-    })
-    
-    const response = await fetch(`${API_BASE}/admin/trigger-failover`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    })
-    
-    const result = await response.json()
-    
-    if (result.success) {
-      executionFlow.value.push({
-        title: 'Failover Complete',
-        detail: `New master: ${result.new_leader_id}`
-      })
-      
-      executionFlow.value.push({
-        title: 'Leader Changed',
-        detail: `${result.old_master} → ${result.new_master}`
-      })
-      
-      queryResult.value = {
-        success: true,
-        message: result.message
-      }
-      
-      // Refresh status
-      setTimeout(async () => {
-        await fetchSystemStatus()
-        await fetchMetrics()
-      }, 1000)
-    } else {
-      queryResult.value = {
-        success: false,
-        message: result.message
-      }
-    }
-  } catch (error: any) {
-    queryResult.value = {
-      success: false,
-      message: `Error: ${error?.message || 'Unknown error'}`
-    }
-  } finally {
-    executing.value = false
-  }
-}
-
-// ==================== STRESS TEST FUNCTIONS ====================
-
-const fetchDataCount = async () => {
-  try {
-    const response = await fetch(`${API_BASE}/admin/stress-test/data-count`)
-    const data = await response.json()
-    dataCount.value = data
-  } catch (error) {
-    console.error('Failed to fetch data count:', error)
-  }
-}
-
+// Stress Test functions
 const clearData = async () => {
   clearingData.value = true
   stressTestResult.value = null
-  consistencyComparisonResult.value = null
   
   try {
     const response = await fetch(`${API_BASE}/admin/clear-data`, {
@@ -1316,115 +908,173 @@ const clearData = async () => {
   }
 }
 
-const runConcurrentWritesTest = async () => {
+const getLatencyBarWidth = (latency: number) => {
+  const maxLatency = stressTestResult.value?.max_latency_ms || 100
+  return Math.min((latency / maxLatency) * 100, 100) + '%'
+}
+
+const startProgressTimer = () => {
+  elapsedTime.value = 0
+  progressTimer = setInterval(() => {
+    elapsedTime.value += 0.1
+  }, 100)
+}
+
+const stopProgressTimer = () => {
+  if (progressTimer) {
+    clearInterval(progressTimer)
+    progressTimer = null
+  }
+}
+
+const addOperation = (success: boolean, latency: number, timestamp: number | null) => {
+  const now = new Date()
+  const timeStr = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  
+  recentOperations.value.unshift({
+    time: timeStr,
+    success,
+    message: success 
+      ? `INSERT completed${timestamp ? ` (ts: ${timestamp})` : ''}`
+      : 'INSERT failed',
+    latency: latency.toFixed(1)
+  })
+  
+  // Keep only last 8 entries
+  if (recentOperations.value.length > 8) {
+    recentOperations.value.pop()
+  }
+}
+
+const runStressTest = async () => {
   stressTestRunning.value = 'concurrent'
   stressTestResult.value = null
-  consistencyComparisonResult.value = null
   
-  try {
-    const response = await fetch(`${API_BASE}/admin/stress-test/concurrent-writes`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        num_operations: stressTestOps.value,
-        consistency: stressTestConsistency.value
+  // Reset live stats
+  liveStats.value = { completed: 0, successful: 0, failed: 0, avgLatency: 0 }
+  recentOperations.value = []
+  progressPercent.value = 0
+  startProgressTimer()
+  
+  const numOps = stressTestOps.value
+  const consistency = stressTestConsistency.value
+  const startTime = Date.now()
+  const latencies: number[] = []
+  const timestamps: number[] = []
+  const errors: Record<string, number> = {}
+  
+  // Generate unique base timestamp
+  const baseTs = Date.now()
+  
+  // Run operations with progress updates
+  const runOperation = async (i: number) => {
+    const opStart = Date.now()
+    const name = `StressUser_${baseTs}_${i}`
+    const email = `stress_${baseTs}_${i}@test.com`
+    const query = `INSERT INTO users (name, email) VALUES ("${name}", "${email}")`
+    
+    try {
+      // Add timeout - ALL consistency can take longer (waiting for all replicas)
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), consistency === 'ALL' ? 15000 : 10000)
+      
+      const response = await fetch(`${API_BASE}/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, consistency }),
+        signal: controller.signal
       })
-    })
-    
-    const result = await response.json()
-    stressTestResult.value = result
-    
-    // Refresh metrics after test
-    await fetchDataCount()
-    await fetchMetrics()
-    await fetchConsistencyMetrics()
-  } catch (error: any) {
-    stressTestResult.value = {
-      test_name: 'Concurrent Writes',
-      total_operations: stressTestOps.value,
-      successful: 0,
-      failed: stressTestOps.value,
-      duration_seconds: 0,
-      throughput_ops_per_sec: 0,
-      avg_latency_ms: 0,
-      min_latency_ms: 0,
-      max_latency_ms: 0,
-      consistency_level: stressTestConsistency.value,
-      errors: { [error?.message || 'Connection failed']: stressTestOps.value }
+      
+      clearTimeout(timeoutId)
+      
+      const result = await response.json()
+      const latency = Date.now() - opStart
+      latencies.push(latency)
+      
+      if (result.success) {
+        liveStats.value.successful++
+        if (result.timestamp) timestamps.push(result.timestamp)
+        addOperation(true, latency, result.timestamp)
+      } else {
+        liveStats.value.failed++
+        // Better error messages for common issues
+        let errorMsg = result.detail || result.error || 'Unknown error'
+        if (errorMsg.includes('Not enough healthy replicas')) {
+          errorMsg = 'Not enough healthy replicas for ' + consistency + ' consistency'
+        }
+        errors[errorMsg] = (errors[errorMsg] || 0) + 1
+        addOperation(false, latency, null)
+      }
+    } catch (error: any) {
+      const latency = Date.now() - opStart
+      latencies.push(latency)
+      liveStats.value.failed++
+      
+      // Provide meaningful error messages
+      let errorMsg = 'Connection failed'
+      if (error.name === 'AbortError') {
+        errorMsg = consistency === 'ALL' 
+          ? 'Timeout: Waiting for all replicas took too long'
+          : 'Request timeout'
+      } else if (error.message?.includes('fetch')) {
+        errorMsg = 'Backend not reachable - is the server running?'
+      } else if (error.message) {
+        errorMsg = error.message
+      }
+      
+      errors[errorMsg] = (errors[errorMsg] || 0) + 1
+      addOperation(false, latency, null)
     }
-  } finally {
-    stressTestRunning.value = null
+    
+    liveStats.value.completed++
+    liveStats.value.avgLatency = Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)
+    progressPercent.value = Math.round((liveStats.value.completed / numOps) * 100)
   }
-}
-
-const runReadWriteMixTest = async () => {
-  stressTestRunning.value = 'mix'
-  stressTestResult.value = null
-  consistencyComparisonResult.value = null
   
-  try {
-    const response = await fetch(`${API_BASE}/admin/stress-test/read-write-mix`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        num_operations: stressTestOps.value,
-        consistency: stressTestConsistency.value
-      })
-    })
-    
-    const result = await response.json()
-    stressTestResult.value = result
-    
-    await fetchDataCount()
-    await fetchMetrics()
-    await fetchConsistencyMetrics()
-  } catch (error: any) {
-    stressTestResult.value = {
-      test_name: 'Read/Write Mix',
-      total_operations: stressTestOps.value,
-      successful: 0,
-      failed: stressTestOps.value,
-      duration_seconds: 0,
-      throughput_ops_per_sec: 0,
-      avg_latency_ms: 0,
-      min_latency_ms: 0,
-      max_latency_ms: 0,
-      consistency_level: stressTestConsistency.value,
-      errors: { [error?.message || 'Connection failed']: stressTestOps.value }
+  // Execute operations based on consistency level
+  // ALL: Run sequentially (one at a time) - backend waits for all replicas which is slow
+  // QUORUM: Small batches of 3
+  // ONE: Larger batches of 10
+  if (consistency === 'ALL') {
+    // Sequential execution for ALL - prevents backend overload
+    for (let i = 0; i < numOps; i++) {
+      await runOperation(i)
     }
-  } finally {
-    stressTestRunning.value = null
+  } else {
+    const batchSize = consistency === 'QUORUM' ? 3 : 10
+    for (let i = 0; i < numOps; i += batchSize) {
+      const batch = []
+      for (let j = i; j < Math.min(i + batchSize, numOps); j++) {
+        batch.push(runOperation(j))
+      }
+      await Promise.all(batch)
+    }
   }
-}
-
-const runConsistencyComparisonTest = async () => {
-  stressTestRunning.value = 'comparison'
-  stressTestResult.value = null
-  consistencyComparisonResult.value = null
   
-  try {
-    const response = await fetch(`${API_BASE}/admin/stress-test/consistency-comparison?num_operations=${Math.min(stressTestOps.value, 30)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    })
-    
-    const result = await response.json()
-    consistencyComparisonResult.value = result
-    
-    // Convert to array for table
-    consistencyComparisonArray.value = Object.keys(result.results).map(level => ({
-      level,
-      ...result.results[level]
-    }))
-    
-    await fetchDataCount()
-    await fetchMetrics()
-    await fetchConsistencyMetrics()
-  } catch (error: any) {
-    console.error('Consistency comparison test failed:', error)
-  } finally {
-    stressTestRunning.value = null
+  stopProgressTimer()
+  
+  const duration = (Date.now() - startTime) / 1000
+  
+  stressTestResult.value = {
+    test_name: 'Concurrent Writes',
+    total_operations: numOps,
+    successful: liveStats.value.successful,
+    failed: liveStats.value.failed,
+    duration_seconds: Math.round(duration * 1000) / 1000,
+    throughput_ops_per_sec: Math.round((numOps / duration) * 100) / 100,
+    avg_latency_ms: Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length * 100) / 100,
+    min_latency_ms: Math.round(Math.min(...latencies) * 100) / 100,
+    max_latency_ms: Math.round(Math.max(...latencies) * 100) / 100,
+    consistency_level: consistency,
+    timestamp_range: timestamps.length > 0 ? { min: Math.min(...timestamps), max: Math.max(...timestamps) } : null,
+    errors: Object.keys(errors).length > 0 ? errors : null
   }
+  
+  await fetchDataCount()
+  await fetchMetrics()
+  await fetchConsistencyMetrics()
+  
+  stressTestRunning.value = null
 }
 
 // Lifecycle
@@ -1435,7 +1085,6 @@ onMounted(() => {
   fetchConsistencyMetrics()
   fetchDataCount()
   
-  // Refresh every 5 seconds
   refreshInterval = setInterval(() => {
     checkServiceHealth()
     fetchMetrics()
@@ -1453,90 +1102,1208 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.mb-2 { margin-bottom: 0.5rem; }
-.mb-3 { margin-bottom: 0.75rem; }
-.mb-4 { margin-bottom: 1rem; }
-.mt-2 { margin-top: 0.5rem; }
-.mt-3 { margin-top: 0.75rem; }
-.ml-2 { margin-left: 0.5rem; }
-.mr-2 { margin-right: 0.5rem; }
-.w-full { width: 100%; }
-.block { display: block; }
-.flex { display: flex; }
-.justify-content-between { justify-content: space-between; }
-.align-items-center { align-items: center; }
-.text-sm { font-size: 0.875rem; }
-.text-color-secondary { color: #64748b; }
-.font-semibold { font-weight: 600; }
+/* Dashboard Layout */
+.dashboard {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 2rem;
+  background: #f5f7fa;
+  min-height: 100vh;
+}
 
-/* Grid layouts */
-.grid { display: grid; gap: 1rem; }
-.grid-2 { grid-template-columns: repeat(2, 1fr); }
-.grid-3 { grid-template-columns: repeat(3, 1fr); }
-.grid-4 { grid-template-columns: repeat(4, 1fr); }
-
-/* Stress test result cards */
-.result-card {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  border-radius: 12px;
-  padding: 1rem;
-  text-align: center;
+.dashboard-header {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
   color: white;
+  padding: 2rem 2.5rem;
+  border-radius: 12px;
+  margin-bottom: 2rem;
 }
 
-.result-card.success {
-  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+.dashboard-header h1 {
+  font-size: 1.75rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
 }
 
-.result-value {
-  font-size: 1.5rem;
-  font-weight: bold;
+.dashboard-header p {
+  opacity: 0.85;
+  font-size: 0.95rem;
+}
+
+/* Sections */
+.dashboard-section {
+  background: white;
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.section-header {
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.section-header h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #1a1a2e;
   margin-bottom: 0.25rem;
 }
 
-.result-label {
-  font-size: 0.75rem;
-  opacity: 0.9;
-  text-transform: uppercase;
+.section-subtitle {
+  font-size: 0.875rem;
+  color: #6b7280;
 }
 
-/* Stress test section */
-.stress-test-section {
-  padding: 0.5rem 0;
+/* Service Status */
+.services-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
 }
 
-.stress-test-results {
-  background: #f8fafc;
-  border-radius: 8px;
+.service-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
   padding: 1rem;
-  margin-top: 1rem;
-}
-
-/* Metric cards */
-.metric-card {
-  background: #f1f5f9;
   border-radius: 8px;
-  padding: 0.75rem 1rem;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  transition: all 0.2s;
 }
 
-.metric-label {
+.service-card.healthy {
+  border-left: 3px solid #10b981;
+}
+
+.service-card.unhealthy {
+  border-left: 3px solid #ef4444;
+  background: #fef2f2;
+}
+
+.service-status-indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.service-card.healthy .service-status-indicator {
+  background: #10b981;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+}
+
+.service-card.unhealthy .service-status-indicator {
+  background: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
+}
+
+.service-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.service-name {
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: #1f2937;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.service-details {
+  display: flex;
+  gap: 0.5rem;
   font-size: 0.75rem;
-  color: #64748b;
+  color: #6b7280;
+  margin-top: 0.25rem;
+}
+
+.service-status-text {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #6b7280;
+}
+
+/* Cluster Topology */
+.topology-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  align-items: center;
+  padding: 1.5rem;
+  background: #f9fafb;
+  border-radius: 8px;
+}
+
+.node-card {
+  padding: 1.25rem;
+  border-radius: 8px;
+  text-align: center;
+  min-width: 200px;
+}
+
+.node-card.master {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  color: white;
+}
+
+.node-card.replica {
+  background: white;
+  border: 1px solid #e5e7eb;
+}
+
+.node-card.replica.unhealthy {
+  border-color: #ef4444;
+  background: #fef2f2;
+}
+
+.node-badge {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 700;
   text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+}
+
+.master .node-badge {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.replica .node-badge {
+  background: #e5e7eb;
+  color: #4b5563;
+}
+
+.node-id {
+  font-size: 1rem;
   font-weight: 600;
   margin-bottom: 0.25rem;
 }
 
-.metric-value {
-  font-size: 1rem;
-  color: #1e293b;
+.node-host {
+  font-size: 0.75rem;
+  opacity: 0.8;
+}
+
+.node-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.75rem;
+  font-size: 0.75rem;
+  opacity: 0.8;
+}
+
+.replication-flow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.flow-line {
+  width: 2px;
+  height: 30px;
+  background: linear-gradient(to bottom, #1a1a2e, #6b7280);
+}
+
+.flow-label {
+  font-size: 0.75rem;
+  color: #6b7280;
   font-weight: 500;
 }
 
-/* Action buttons */
-.action-buttons {
+.topology-replicas {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.replica-metrics {
+  margin-top: 0.75rem;
+  text-align: left;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.25rem 0;
+  font-size: 0.8rem;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.metric-row:last-child {
+  border-bottom: none;
+}
+
+.metric-name {
+  color: #6b7280;
+}
+
+.metric-value {
+  font-weight: 500;
+  color: #1f2937;
+}
+
+.metric-value.good { color: #10b981; }
+.metric-value.warning { color: #f59e0b; }
+.metric-value.bad { color: #ef4444; }
+
+/* Metrics Explanation */
+.metrics-explanation {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: #f0fdf4;
+  border-radius: 8px;
+  border: 1px solid #bbf7d0;
+}
+
+.metrics-explanation h3 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #166534;
+  margin-bottom: 1rem;
+}
+
+.explanation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.explanation-item {
+  padding: 0.75rem;
+  background: white;
+  border-radius: 6px;
+}
+
+.explanation-term {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #166534;
+  margin-bottom: 0.25rem;
+}
+
+.explanation-desc {
+  font-size: 0.8rem;
+  color: #4b5563;
+  line-height: 1.4;
+}
+
+/* Failover Section */
+.failover-container {
+  padding: 1rem;
+}
+
+.failover-info {
+  background: #f9fafb;
+  padding: 1rem;
+  border-radius: 8px;
+  margin-bottom: 1.5rem;
+}
+
+.failover-info p {
+  font-size: 0.875rem;
+  color: #4b5563;
+  margin-bottom: 0.75rem;
+}
+
+.failover-info ul {
+  list-style: none;
+  padding: 0;
+}
+
+.failover-info li {
+  font-size: 0.8rem;
+  color: #6b7280;
+  padding: 0.25rem 0;
+  padding-left: 1rem;
+  position: relative;
+}
+
+.failover-info li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 4px;
+  background: #6b7280;
+  border-radius: 50%;
+}
+
+.failover-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.action-card {
+  padding: 1.25rem;
+  background: #f9fafb;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
+.action-card h4 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 0.5rem;
+}
+
+.action-card p {
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin-bottom: 1rem;
+  line-height: 1.4;
+}
+
+.failover-progress {
+  background: #f9fafb;
+  padding: 1rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.failover-progress h4 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 1rem;
+}
+
+.progress-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.progress-step {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background: white;
+  border-radius: 6px;
+  border-left: 3px solid #3b82f6;
+}
+
+.step-number {
+  width: 24px;
+  height: 24px;
+  background: #3b82f6;
+  color: white;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.step-content {
+  flex: 1;
+}
+
+.step-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #1f2937;
+}
+
+.step-detail {
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin-top: 0.25rem;
+}
+
+.failover-result {
+  padding: 1rem;
+  border-radius: 8px;
+  font-size: 0.875rem;
+}
+
+.failover-result.success {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+}
+
+.failover-result.error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+}
+
+/* Stress Test Section */
+.stress-test-container {
+  padding: 1rem;
+}
+
+/* Test Explanation */
+.test-explanation {
+  background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+  padding: 1.5rem;
+  border-radius: 10px;
+  margin-bottom: 1.5rem;
+  border: 1px solid #bae6fd;
+}
+
+.test-explanation h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #0369a1;
+  margin-bottom: 1rem;
+}
+
+.test-goals {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.test-goal {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.goal-icon {
+  width: 28px;
+  height: 28px;
+  background: #0284c7;
+  color: white;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.goal-content strong {
+  display: block;
+  font-size: 0.9rem;
+  color: #0c4a6e;
+  margin-bottom: 0.25rem;
+}
+
+.goal-content p {
+  font-size: 0.8rem;
+  color: #475569;
+  line-height: 1.4;
+}
+
+/* Test Config */
+.test-config {
+  background: #f9fafb;
+  padding: 1.25rem;
+  border-radius: 10px;
+  margin-bottom: 1.5rem;
+  border: 1px solid #e5e7eb;
+}
+
+.config-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.config-header h4 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.data-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+
+.config-options {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.config-option label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #4b5563;
+  margin-bottom: 0.5rem;
+}
+
+.option-buttons {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
+}
+
+.option-buttons button {
+  padding: 0.5rem 1rem;
+  border: 1px solid #d1d5db;
+  background: white;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.option-buttons button:hover {
+  border-color: #3b82f6;
+}
+
+.option-buttons button.active {
+  background: #3b82f6;
+  color: white;
+  border-color: #3b82f6;
+}
+
+.consistency-buttons {
+  gap: 0.75rem;
+}
+
+.consistency-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0.75rem 1rem !important;
+  min-width: 160px;
+}
+
+.consistency-btn .btn-label {
+  font-weight: 600;
+}
+
+.consistency-btn .btn-desc {
+  font-size: 0.7rem;
+  opacity: 0.8;
+  margin-top: 0.25rem;
+}
+
+.consistency-btn.one.active {
+  background: #059669 !important;
+  border-color: #059669 !important;
+}
+
+.consistency-btn.quorum.active {
+  background: #2563eb !important;
+  border-color: #2563eb !important;
+}
+
+.consistency-btn.all.active {
+  background: #d97706 !important;
+  border-color: #d97706 !important;
+}
+
+/* Run Test Section */
+.run-test-section {
+  text-align: center;
+  padding: 1.5rem;
+  background: #fafafa;
+  border-radius: 10px;
+  margin-bottom: 1.5rem;
+  border: 2px dashed #e5e7eb;
+}
+
+.run-description {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+
+.consistency-warning {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: #d97706;
+  background: #fef3c7;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid #fde68a;
+}
+
+/* Live Progress */
+.live-progress {
+  background: #1e293b;
+  color: white;
+  padding: 1.5rem;
+  border-radius: 10px;
+  margin-bottom: 1.5rem;
+}
+
+.progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.progress-header h4 {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.elapsed-time {
+  font-family: monospace;
+  font-size: 1.1rem;
+  color: #60a5fa;
+}
+
+.progress-bar-container {
+  height: 8px;
+  background: #334155;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 1.5rem;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+  transition: width 0.3s ease;
+}
+
+.live-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.live-stat {
+  text-align: center;
+  padding: 1rem;
+  background: #334155;
+  border-radius: 8px;
+}
+
+.live-stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.live-stat-label {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  margin-top: 0.25rem;
+}
+
+.operation-log h5 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  color: #94a3b8;
+}
+
+.log-entries {
+  font-family: monospace;
+  font-size: 0.8rem;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.log-entry {
+  display: flex;
+  gap: 1rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 4px;
+  margin-bottom: 0.25rem;
+}
+
+.log-entry.success {
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.log-entry.failure {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.log-time {
+  color: #64748b;
+}
+
+.log-message {
+  flex: 1;
+  color: #e2e8f0;
+}
+
+.log-entry.success .log-message {
+  color: #4ade80;
+}
+
+.log-entry.failure .log-message {
+  color: #f87171;
+}
+
+.log-latency {
+  color: #60a5fa;
+}
+
+/* Test Results */
+.test-results {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.results-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.results-header h4 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.result-badge {
+  padding: 0.35rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.result-badge.success {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.result-badge.partial {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* Key Metrics */
+.key-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.key-metric {
+  display: flex;
+  gap: 1rem;
+  padding: 1rem;
+  background: #f9fafb;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
+.metric-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.metric-icon.throughput {
+  background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+}
+
+.metric-icon.latency {
+  background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+}
+
+.metric-icon.success {
+  background: linear-gradient(135deg, #10b981, #059669);
+}
+
+.metric-icon.time {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+}
+
+.metric-data .metric-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.metric-data .metric-label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #4b5563;
+}
+
+.metric-data .metric-context {
+  font-size: 0.75rem;
+  color: #9ca3af;
+  margin-top: 0.25rem;
+}
+
+/* Latency Section */
+.latency-section {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background: #f9fafb;
+  border-radius: 8px;
+}
+
+.latency-section h5 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 1rem;
+}
+
+.latency-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.latency-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.bar-label {
+  width: 40px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #6b7280;
+}
+
+.bar-visual {
+  flex: 1;
+  height: 24px;
+  background: #e5e7eb;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.bar-fill.min {
+  background: linear-gradient(90deg, #10b981, #34d399);
+}
+
+.bar-fill.avg {
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+}
+
+.bar-fill.max {
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+}
+
+.bar-value {
+  width: 80px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #374151;
+  text-align: right;
+}
+
+.latency-explanation {
+  padding: 0.75rem;
+  background: #fff;
+  border-radius: 6px;
+  border-left: 3px solid #3b82f6;
+}
+
+.latency-explanation p {
+  font-size: 0.8rem;
+  color: #4b5563;
+  line-height: 1.5;
+}
+
+/* Timestamp Section */
+.timestamp-section {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background: #f0fdf4;
+  border-radius: 8px;
+  border: 1px solid #bbf7d0;
+}
+
+.timestamp-section h5 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #166534;
+  margin-bottom: 1rem;
+}
+
+.timestamp-visual {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.ts-start, .ts-end {
+  text-align: center;
+  padding: 0.75rem 1rem;
+  background: white;
+  border-radius: 8px;
+  min-width: 120px;
+}
+
+.ts-label {
+  display: block;
+  font-size: 0.7rem;
+  color: #6b7280;
+  margin-bottom: 0.25rem;
+}
+
+.ts-value {
+  font-family: monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #166534;
+}
+
+.ts-arrow {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.arrow-line {
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg, #22c55e, #166534);
+  position: relative;
+}
+
+.arrow-line::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: -4px;
+  border: 5px solid transparent;
+  border-left-color: #166534;
+}
+
+.arrow-label {
+  font-size: 0.75rem;
+  color: #166534;
+}
+
+.timestamp-explanation {
+  font-size: 0.8rem;
+  color: #4b5563;
+  line-height: 1.5;
+}
+
+/* Errors Section */
+.errors-section {
+  padding: 1rem;
+  background: #fef2f2;
+  border-radius: 8px;
+  border: 1px solid #fecaca;
+  margin-bottom: 1.5rem;
+}
+
+.errors-section h5 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #991b1b;
+  margin-bottom: 0.75rem;
+}
+
+.error-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.error-item {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+}
+
+.error-count {
+  font-weight: 600;
+  color: #dc2626;
+}
+
+.error-message {
+  color: #7f1d1d;
+}
+
+/* What Happened */
+.what-happened {
+  padding: 1rem;
+  background: #fffbeb;
+  border-radius: 8px;
+  border: 1px solid #fde68a;
+}
+
+.what-happened h5 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #92400e;
+  margin-bottom: 0.75rem;
+}
+
+.step-list {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.step-list li {
+  font-size: 0.8rem;
+  color: #78350f;
+  line-height: 1.6;
+  margin-bottom: 0.25rem;
+}
+
+/* Cumulative Stats */
+.cumulative-stats {
+  background: #f9fafb;
+  padding: 1.25rem;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+}
+
+.cumulative-stats h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 0.25rem;
+}
+
+.stats-subtitle {
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin-bottom: 1rem;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+
+.stat-card {
+  background: white;
+  border-radius: 8px;
+  padding: 1rem;
+  border: 1px solid #e5e7eb;
+}
+
+.stat-card.one {
+  border-top: 3px solid #10b981;
+}
+
+.stat-card.quorum {
+  border-top: 3px solid #3b82f6;
+}
+
+.stat-card.all {
+  border-top: 3px solid #f59e0b;
+}
+
+.stat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.stat-level {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.stat-card.one .stat-level { color: #059669; }
+.stat-card.quorum .stat-level { color: #2563eb; }
+.stat-card.all .stat-level { color: #d97706; }
+
+.stat-count {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.35rem 0;
+  font-size: 0.8rem;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.stat-row:last-child {
+  border-bottom: none;
+}
+
+.stat-row span:first-child {
+  color: #6b7280;
+}
+
+.stat-row span:last-child {
+  font-weight: 500;
+  color: #1f2937;
+}
+
+.stat-row .good {
+  color: #059669;
+}
+
+.stat-row .bad {
+  color: #dc2626;
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+  .key-metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .live-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .key-metrics {
+    grid-template-columns: 1fr;
+  }
+  
+  .timestamp-visual {
+    flex-direction: column;
+  }
+  
+  .ts-arrow {
+    transform: rotate(90deg);
+    width: 60px;
+  }
 }
 </style>
