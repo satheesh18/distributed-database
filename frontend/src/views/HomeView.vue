@@ -565,13 +565,65 @@ const checkServiceHealth = async () => {
     }
   }
 
-  // Assume MySQL and timestamp services are healthy if coordinator is healthy
+  // Check timestamp services health via coordinator
   const coordinator = services.value[0]
   if (coordinator?.healthy) {
-    for (let i = 1; i <= 6; i++) {
-      const service = services.value[i]
-      if (service) {
-        service.healthy = true
+    // Timestamp services are healthy if coordinator is up
+    const timestampService1 = services.value[5]
+    const timestampService2 = services.value[6]
+    if (timestampService1) timestampService1.healthy = true
+    if (timestampService2) timestampService2.healthy = true
+  }
+
+  // Get MySQL instance health from metrics collector
+  try {
+    const metricsResponse = await fetch('http://localhost:9003/metrics')
+    if (metricsResponse.ok) {
+      const metricsData = await metricsResponse.json()
+      const replicas = metricsData.replicas || []
+      
+      // Map instance IDs to service indices
+      // services[1] = MySQL Instance 1 (instance-1)
+      // services[2] = MySQL Instance 2 (instance-2)
+      // services[3] = MySQL Instance 3 (instance-3)
+      // services[4] = MySQL Instance 4 (instance-4)
+      
+      const instanceToIndex: Record<string, number> = {
+        'instance-1': 1,
+        'instance-2': 2,
+        'instance-3': 3,
+        'instance-4': 4
+      }
+      
+      // First, set all MySQL instances to unhealthy by default
+      for (let i = 1; i <= 4; i++) {
+        const service = services.value[i]
+        if (service) {
+          service.healthy = false
+        }
+      }
+      
+      // Update health status based on metrics from metrics-collector
+      // This now includes all 4 instances (instance-1 through instance-4)
+      for (const replica of replicas) {
+        const index = instanceToIndex[replica.replica_id]
+        if (index !== undefined) {
+          const service = services.value[index]
+          if (service) {
+            service.healthy = replica.is_healthy
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Failed to get MySQL health from metrics:', error)
+    // If metrics collector is down, fall back to assuming MySQL is healthy if coordinator is up
+    if (coordinator?.healthy) {
+      for (let i = 1; i <= 4; i++) {
+        const service = services.value[i]
+        if (service) {
+          service.healthy = true
+        }
       }
     }
   }

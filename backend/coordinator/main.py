@@ -373,8 +373,18 @@ async def demote_master_to_replica(old_master_container: str, new_master_host: s
     try:
         print(f"Demoting {old_master_container} to replica of {new_master_host}...")
         
-        # SQL commands to demote master to replica
+        # Determine the correct server_id based on container name
+        server_id_map = {
+            "mysql-instance-1": 1,
+            "mysql-instance-2": 2,
+            "mysql-instance-3": 3,
+            "mysql-instance-4": 4,
+        }
+        server_id = server_id_map.get(old_master_container, 100)
+        
+        # SQL commands to demote master to replica (including server_id fix)
         demote_sql = f"""
+            SET GLOBAL server_id = {server_id};
             SET GLOBAL read_only = ON;
             SET GLOBAL super_read_only = ON;
             STOP SLAVE;
@@ -1091,7 +1101,34 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
         # Wait for MySQL to be fully ready
         await asyncio.sleep(3)
         
-        # Step 0: Verify replicator user exists on master
+        # Determine the correct server_id based on container name
+        # This is crucial to avoid "same server ID" errors after failover
+        server_id_map = {
+            "mysql-instance-1": 1,
+            "mysql-instance-2": 2,
+            "mysql-instance-3": 3,
+            "mysql-instance-4": 4,
+        }
+        server_id = server_id_map.get(replica_container, 100)
+        
+        # Step 0: Set the correct server ID (crucial for avoiding conflicts)
+        print(f"Setting server_id to {server_id} for {replica_container}...")
+        server_id_sql = f"SET GLOBAL server_id = {server_id};"
+        result = subprocess.run(
+            ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", server_id_sql],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            print(f"Warning: Could not set server_id: {result.stderr}")
+        else:
+            print(f"Server ID set to {server_id}")
+        
+        await asyncio.sleep(1)
+        
+        # Step 1: Verify replicator user exists on master
         print(f"Verifying replicator user on master {master_host}...")
         verify_user_sql = "SELECT User, Host FROM mysql.user WHERE User='replicator';"
         result = subprocess.run(
@@ -1376,17 +1413,46 @@ async def start_instance(request: StartInstanceRequest):
                     total_replicas=len(current_replicas)
                 )
             
-            # Check if instance is already a replica
+            # Check if instance is already a replica in state
             already_replica = any(r["id"] == instance_id for r in current_replicas)
         
-        if already_replica:
-            return TopologyResponse(
-                current_master=current_master,
-                current_replicas=current_replicas,
-                total_replicas=len(current_replicas)
+        # Even if it's in the replicas list, we need to check if the container is actually running
+        # and properly configured. Check container status first.
+        container_running = False
+        try:
+            check_result = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", instance_container],
+                capture_output=True,
+                text=True,
+                timeout=5
             )
+            container_running = check_result.returncode == 0 and "true" in check_result.stdout.lower()
+        except Exception as e:
+            print(f"Error checking container status: {e}")
+            container_running = False
         
-        # Step 1: Start the container
+        # If container is running and already in replicas, verify replication is working
+        if already_replica and container_running:
+            # Verify replication is actually working
+            try:
+                repl_check = subprocess.run(
+                    ["docker", "exec", instance_container, "mysql", "-u", "root", "-prootpass", "-e", 
+                     "SHOW SLAVE STATUS\\G"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if "Slave_IO_Running: Yes" in repl_check.stdout and "Slave_SQL_Running: Yes" in repl_check.stdout:
+                    print(f"{instance_id} is already running and replicating correctly")
+                    return TopologyResponse(
+                        current_master=current_master,
+                        current_replicas=current_replicas,
+                        total_replicas=len(current_replicas)
+                    )
+            except Exception as e:
+                print(f"Replication check failed: {e}")
+        
+        # Need to start/restart the container and configure replication
         print(f"Starting {instance_container} container...")
         result = subprocess.run(
             ["docker", "start", instance_container],
@@ -1421,9 +1487,10 @@ async def start_instance(request: StartInstanceRequest):
                 detail=f"Instance {instance_id} started but replication configuration failed. Check logs for details."
             )
         
-        # Step 4: Add to replicas list
+        # Step 4: Add to replicas list (only if not already there)
         with state_lock:
-            current_replicas.append(instance_info)
+            if not any(r["id"] == instance_id for r in current_replicas):
+                current_replicas.append(instance_info)
             
             response = TopologyResponse(
                 current_master=current_master.copy(),

@@ -36,7 +36,15 @@ app.add_middleware(
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "rootpass")
 MYSQL_MASTER_HOST = os.getenv("MYSQL_MASTER_HOST", "mysql-instance-1")
 
-# Three replica configuration
+# All MySQL instances (including master for health tracking)
+MYSQL_INSTANCES = [
+    {"id": "instance-1", "host": os.getenv("MYSQL_MASTER_HOST", "mysql-instance-1")},
+    {"id": "instance-2", "host": os.getenv("MYSQL_REPLICA_2_HOST", "mysql-instance-2")},
+    {"id": "instance-3", "host": os.getenv("MYSQL_REPLICA_3_HOST", "mysql-instance-3")},
+    {"id": "instance-4", "host": os.getenv("MYSQL_REPLICA_4_HOST", "mysql-instance-4")},
+]
+
+# Keep MYSQL_REPLICAS for backward compatibility (excludes instance-1)
 MYSQL_REPLICAS = [
     {"id": "instance-2", "host": os.getenv("MYSQL_REPLICA_2_HOST", "mysql-instance-2")},
     {"id": "instance-3", "host": os.getenv("MYSQL_REPLICA_3_HOST", "mysql-instance-3")},
@@ -186,16 +194,16 @@ def get_replication_status(host: str) -> dict:
 
 def collect_metrics():
     """
-    Background task to collect metrics from all replicas.
+    Background task to collect metrics from all MySQL instances.
     Runs every 5 seconds.
     """
     global replica_metrics
     
-    # Initialize metrics for each replica
-    for replica in MYSQL_REPLICAS:
-        replica_id = replica["id"]
-        if replica_id not in replica_metrics:
-            replica_metrics[replica_id] = {
+    # Initialize metrics for ALL instances (including instance-1)
+    for instance in MYSQL_INSTANCES:
+        instance_id = instance["id"]
+        if instance_id not in replica_metrics:
+            replica_metrics[instance_id] = {
                 "latency_ms": 0.0,
                 "replication_lag": 0,
                 "uptime_seconds": 0.0,
@@ -207,27 +215,35 @@ def collect_metrics():
     
     while True:
         try:
-            # Get master's current timestamp
+            # First, try to get master timestamp from the original master
             master_timestamp = get_last_applied_timestamp(MYSQL_MASTER_HOST)
             
-            # Collect metrics for each replica
-            for replica in MYSQL_REPLICAS:
-                replica_id = replica["id"]
-                host = replica["host"]
+            # If original master is down, try to find another healthy instance for timestamp
+            if master_timestamp == 0:
+                for instance in MYSQL_INSTANCES:
+                    if instance["host"] != MYSQL_MASTER_HOST:
+                        ts = get_last_applied_timestamp(instance["host"])
+                        if ts > master_timestamp:
+                            master_timestamp = ts
+            
+            # Collect metrics for ALL instances
+            for instance in MYSQL_INSTANCES:
+                instance_id = instance["id"]
+                host = instance["host"]
                 
                 # Measure latency
                 latency = measure_latency(host)
                 
-                # Get replica's last applied timestamp
-                replica_timestamp = get_last_applied_timestamp(host)
+                # Get instance's last applied timestamp
+                instance_timestamp = get_last_applied_timestamp(host)
                 
-                # Calculate replication lag
-                lag = max(0, master_timestamp - replica_timestamp)
+                # Calculate replication lag (relative to the highest known timestamp)
+                lag = max(0, master_timestamp - instance_timestamp) if master_timestamp > 0 else 0
                 
                 with metrics_lock:
-                    metrics = replica_metrics[replica_id]
+                    metrics = replica_metrics[instance_id]
                     
-                    # Check if replica is healthy
+                    # Check if instance is healthy
                     was_healthy = metrics["is_healthy"]
                     is_healthy = latency < 5000  # Consider unhealthy if latency > 5s
                     
@@ -236,6 +252,10 @@ def collect_metrics():
                         metrics["crash_count"] += 1
                         metrics["last_crash_time"] = time.time()
                         metrics["start_time"] = time.time()  # Reset uptime
+                    
+                    # Track recovery (transitions from unhealthy to healthy)
+                    if not was_healthy and is_healthy:
+                        metrics["start_time"] = time.time()  # Reset uptime on recovery
                     
                     # Update metrics
                     metrics["latency_ms"] = latency
@@ -266,10 +286,10 @@ async def startup_event():
 @app.get("/metrics", response_model=MetricsResponse)
 async def get_all_metrics():
     """
-    Get metrics for all replicas.
+    Get metrics for all MySQL instances.
     
     Returns:
-        MetricsResponse: Contains metrics for all replicas and master timestamp
+        MetricsResponse: Contains metrics for all instances and master timestamp
     """
     with metrics_lock:
         replicas = []
@@ -284,7 +304,16 @@ async def get_all_metrics():
                 is_healthy=metrics["is_healthy"]
             ))
         
+        # Try to get master timestamp from the original master first
         master_timestamp = get_last_applied_timestamp(MYSQL_MASTER_HOST)
+        
+        # If original master is down, find the highest timestamp from healthy instances
+        if master_timestamp == 0:
+            for instance in MYSQL_INSTANCES:
+                if instance["host"] != MYSQL_MASTER_HOST:
+                    ts = get_last_applied_timestamp(instance["host"])
+                    if ts > master_timestamp:
+                        master_timestamp = ts
         
         return MetricsResponse(replicas=replicas, master_timestamp=master_timestamp)
 
