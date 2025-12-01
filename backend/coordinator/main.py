@@ -78,24 +78,35 @@ current_replicas = [
 
 # Consistency metrics tracking
 consistency_metrics = {
-    "ONE": {"count": 0, "total_latency": 0.0, "failures": 0},
-    "QUORUM": {"count": 0, "total_latency": 0.0, "failures": 0, "quorum_not_achieved": 0},
-    "ALL": {"count": 0, "total_latency": 0.0, "failures": 0}
+    "EVENTUAL": {
+        "read_count": 0,
+        "write_count": 0,
+        "read_latency": 0.0,
+        "write_latency": 0.0,
+        "failures": 0
+    },
+    "STRONG": {
+        "read_count": 0,
+        "write_count": 0,
+        "read_latency": 0.0,
+        "write_latency": 0.0,
+        "failures": 0,
+        "quorum_not_achieved": 0
+    }
 }
 metrics_lock = threading.Lock()
 
 
 class ConsistencyLevel(str, Enum):
     """Consistency levels for read and write operations"""
-    ONE = "ONE"
-    QUORUM = "QUORUM"
-    ALL = "ALL"
+    EVENTUAL = "EVENTUAL"  # Fast writes/reads, master only write, replica reads
+    STRONG = "STRONG"      # Wait for Cabinet-selected quorum on writes, master reads
 
 
 class QueryRequest(BaseModel):
     """Request model for SQL queries"""
     query: str
-    consistency: ConsistencyLevel = ConsistencyLevel.QUORUM  # Default to QUORUM
+    consistency: ConsistencyLevel = ConsistencyLevel.STRONG  # Default to QUORUM
 
 
 class QueryResponse(BaseModel):
@@ -268,14 +279,43 @@ async def check_replicas_health() -> dict:
         print(f"Error checking replica health: {e}")
         return {"healthy_count": 0, "healthy_replicas": []}
 
-
-async def wait_for_quorum_catchup(timestamp: int, quorum_size: int = 2, timeout_seconds: float = 5.0) -> dict:
+async def get_cabinet_quorum() -> List[str]:
     """
-    Post-write verification: Wait for quorum of replicas to catch up to the given timestamp.
+    Get optimal quorum from Cabinet service based on replica performance.
+    
+    Returns:
+        List of replica IDs selected by Cabinet algorithm
+        
+    Raises:
+        HTTPException: If Cabinet service fails
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{CABINET_SERVICE_URL}/select-quorum",
+                json={"operation": "write"},
+                timeout=5.0
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data["quorum"]
+    except Exception as e:
+        raise HTTPException(
+            status_code=503, 
+            detail=f"Failed to get Cabinet quorum: {str(e)}"
+        )
+
+async def wait_for_quorum_catchup(
+    timestamp: int, 
+    quorum_replicas: List[str], 
+    timeout_seconds: float = 5.0
+) -> dict:
+    """
+    Post-write verification: Wait for Cabinet-selected quorum replicas to catch up.
     
     Args:
         timestamp: Target timestamp to wait for
-        quorum_size: Number of replicas needed for quorum (default 2 out of 3)
+        quorum_replicas: List of replica IDs selected by Cabinet (e.g., ["instance-2", "instance-3"])
         timeout_seconds: Maximum time to wait
         
     Returns:
@@ -284,14 +324,16 @@ async def wait_for_quorum_catchup(timestamp: int, quorum_size: int = 2, timeout_
     start_time = time.time()
     
     with state_lock:
-        replica_hosts = [(r["id"], r["host"]) for r in current_replicas]
+        replica_map = {r["id"]: r["host"] for r in current_replicas}
     
+    # Only monitor the Cabinet-selected replicas
+    target_replicas = [(rid, replica_map[rid]) for rid in quorum_replicas if rid in replica_map]
     caught_up_replicas = []
     
     while (time.time() - start_time) < timeout_seconds:
         caught_up_replicas = []
         
-        for replica_id, replica_host in replica_hosts:
+        for replica_id, replica_host in target_replicas:
             try:
                 replica_timestamp = get_last_applied_timestamp(replica_host)
                 
@@ -300,15 +342,14 @@ async def wait_for_quorum_catchup(timestamp: int, quorum_size: int = 2, timeout_
             except Exception as e:
                 print(f"Error checking replica {replica_id} timestamp: {e}")
         
-        # Check if we have quorum
-        if len(caught_up_replicas) >= quorum_size:
+        # Check if all Cabinet-selected replicas caught up
+        if len(caught_up_replicas) >= len(target_replicas):
             return {
                 "quorum_achieved": True,
                 "caught_up_count": len(caught_up_replicas),
                 "caught_up_replicas": caught_up_replicas
             }
         
-        # Wait a bit before checking again
         await asyncio.sleep(0.1)
     
     return {
@@ -316,7 +357,6 @@ async def wait_for_quorum_catchup(timestamp: int, quorum_size: int = 2, timeout_
         "caught_up_count": len(caught_up_replicas),
         "caught_up_replicas": caught_up_replicas
     }
-
 
 async def promote_replica_to_master(replica_container: str) -> bool:
     """
@@ -419,19 +459,11 @@ async def demote_master_to_replica(old_master_container: str, new_master_host: s
 
 async def handle_write_query(query: str, consistency: ConsistencyLevel) -> QueryResponse:
     """
-    Handle a write query with binlog-based replication and eventual quorum consistency.
+    Handle a write query with Cabinet-integrated replication.
     
     Consistency Levels:
-    - ONE: Write to master only, return immediately (eventual consistency)
-    - QUORUM: Write to master, wait for 2 out of 3 replicas to catch up (strong consistency)
-    - ALL: Write to master, wait for all 3 replicas to catch up (strongest consistency)
-    
-    Args:
-        query: SQL write query
-        consistency: Desired consistency level
-        
-    Returns:
-        QueryResponse with execution results and metrics
+    - EVENTUAL: Write to master only, return immediately (fast)
+    - STRONG: Write to master, wait for Cabinet-selected quorum to catch up
     """
     global current_master, current_replicas
     
@@ -440,19 +472,10 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
     # Step 1: Get timestamp
     timestamp = await get_timestamp()
     
-    # Step 2: Pre-flight check for QUORUM/ALL consistency
-    if consistency in [ConsistencyLevel.QUORUM, ConsistencyLevel.ALL]:
-        health_status = await check_replicas_health()
-        
-        required_healthy = 2 if consistency == ConsistencyLevel.QUORUM else 3
-        
-        if health_status["healthy_count"] < required_healthy:
-            with metrics_lock:
-                consistency_metrics[consistency.value]["failures"] += 1
-            raise HTTPException(
-                status_code=503,
-                detail=f"Not enough healthy replicas. Need {required_healthy}, have {health_status['healthy_count']}. Cannot achieve {consistency.value} consistency."
-            )
+    # Step 2: For STRONG consistency, get Cabinet quorum (no pre-flight check)
+    cabinet_quorum = None
+    if consistency == ConsistencyLevel.STRONG:
+        cabinet_quorum = await get_cabinet_quorum()
     
     # Step 3: Execute on master
     with state_lock:
@@ -463,7 +486,6 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
     
     # Check if master execution failed
     if not result["success"]:
-        # Master might be down - attempt failover
         print(f"Master execution failed: {result.get('error')}")
         
         # Use SEER to elect best replica
@@ -482,7 +504,7 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
                 consistency_metrics[consistency.value]["failures"] += 1
             raise HTTPException(status_code=503, detail=f"Leader election failed: {str(e)}")
         
-        # Find the elected replica
+        # Find and promote elected replica
         with state_lock:
             elected_replica = next((r for r in current_replicas if r["id"] == new_leader_id), None)
         
@@ -491,7 +513,6 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
                 consistency_metrics[consistency.value]["failures"] += 1
             raise HTTPException(status_code=503, detail=f"Elected leader {new_leader_id} not found")
         
-        # Promote elected replica to master
         promotion_success = await promote_replica_to_master(elected_replica["container"])
         
         if not promotion_success:
@@ -503,7 +524,6 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
         with state_lock:
             old_master = current_master
             current_master = elected_replica
-            # Remove elected replica from replicas list and add old master
             current_replicas = [r for r in current_replicas if r["id"] != new_leader_id]
             current_replicas.append(old_master)
         
@@ -520,171 +540,130 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
     latency_ms = (time.time() - start_time) * 1000
     
     # Consistency-specific logic
-    if consistency == ConsistencyLevel.ONE:
-        # ONE: Return immediately after master confirms (fastest, eventual consistency)
-        # Binlog will automatically replicate to replicas
-        
+    if consistency == ConsistencyLevel.EVENTUAL:
+        # EVENTUAL: Return immediately after master confirms
         with metrics_lock:
-            consistency_metrics["ONE"]["count"] += 1
-            consistency_metrics["ONE"]["total_latency"] += latency_ms
+            consistency_metrics["EVENTUAL"]["write_count"] += 1
+            consistency_metrics["EVENTUAL"]["write_latency"] += latency_ms
         
         return QueryResponse(
             success=True,
-            message=f"Write successful (consistency: ONE, timestamp: {timestamp})",
+            message=f"Write successful (consistency: EVENTUAL, timestamp: {timestamp})",
             timestamp=timestamp,
             rows_affected=result["rows_affected"],
             executed_on=master_host,
-            consistency_level="ONE",
+            consistency_level="EVENTUAL",
             latency_ms=round(latency_ms, 2),
             quorum_achieved=None,
             replica_caught_up=None
         )
     
-    elif consistency == ConsistencyLevel.QUORUM:
-        # QUORUM: Wait for 2 out of 3 replicas to catch up
-        catchup_result = await wait_for_quorum_catchup(timestamp, quorum_size=2, timeout_seconds=5.0)
+    else:  # ConsistencyLevel.STRONG
+        # STRONG: Wait for Cabinet-selected replicas to catch up
+        catchup_result = await wait_for_quorum_catchup(
+            timestamp, 
+            quorum_replicas=cabinet_quorum,
+            timeout_seconds=5.0
+        )
         
         latency_ms = (time.time() - start_time) * 1000
         
         if not catchup_result["quorum_achieved"]:
-            # Write succeeded on master but quorum didn't catch up in time
+            # Write succeeded on master but Cabinet quorum didn't catch up
             with metrics_lock:
-                consistency_metrics["QUORUM"]["count"] += 1
-                consistency_metrics["QUORUM"]["total_latency"] += latency_ms
-                consistency_metrics["QUORUM"]["quorum_not_achieved"] += 1
+                consistency_metrics["STRONG"]["write_count"] += 1
+                consistency_metrics["STRONG"]["write_latency"] += latency_ms
+                consistency_metrics["STRONG"]["quorum_not_achieved"] += 1
             
             return QueryResponse(
                 success=True,
-                message=f"Write successful on master (timestamp: {timestamp}), but only {catchup_result['caught_up_count']}/3 replicas caught up. Data will eventually propagate via binlog.",
+                message=f"Write successful on master (timestamp: {timestamp}), but only {catchup_result['caught_up_count']}/{len(cabinet_quorum)} Cabinet replicas caught up. Data will eventually propagate.",
                 timestamp=timestamp,
                 rows_affected=result["rows_affected"],
                 executed_on=master_host,
-                consistency_level="QUORUM",
+                consistency_level="STRONG",
                 latency_ms=round(latency_ms, 2),
                 quorum_achieved=False,
                 replica_caught_up=False
             )
         
-        # Quorum achieved - 2+ replicas caught up
+        # Cabinet quorum achieved
         with metrics_lock:
-            consistency_metrics["QUORUM"]["count"] += 1
-            consistency_metrics["QUORUM"]["total_latency"] += latency_ms
+            consistency_metrics["STRONG"]["write_count"] += 1
+            consistency_metrics["STRONG"]["write_latency"] += latency_ms
         
         return QueryResponse(
             success=True,
-            message=f"Write successful (consistency: QUORUM, timestamp: {timestamp}, {catchup_result['caught_up_count']}/3 replicas confirmed)",
+            message=f"Write successful (consistency: STRONG, timestamp: {timestamp}, Cabinet replicas: {', '.join(catchup_result['caught_up_replicas'])})",
             timestamp=timestamp,
             rows_affected=result["rows_affected"],
             executed_on=master_host,
-            consistency_level="QUORUM",
+            consistency_level="STRONG",
             latency_ms=round(latency_ms, 2),
             quorum_achieved=True,
             replica_caught_up=True
         )
-    
-    else:  # ConsistencyLevel.ALL
-        # ALL: Wait for all 3 replicas to catch up
-        catchup_result = await wait_for_quorum_catchup(timestamp, quorum_size=3, timeout_seconds=5.0)
-        
-        latency_ms = (time.time() - start_time) * 1000
-        
-        if not catchup_result["quorum_achieved"]:
-            # Write succeeded on master but not all replicas caught up
-            with metrics_lock:
-                consistency_metrics["ALL"]["count"] += 1
-                consistency_metrics["ALL"]["total_latency"] += latency_ms
-                consistency_metrics["ALL"]["quorum_not_achieved"] += 1
-            
-            return QueryResponse(
-                success=True,
-                message=f"Write successful on master (timestamp: {timestamp}), but only {catchup_result['caught_up_count']}/3 replicas caught up. Data will eventually propagate via binlog.",
-                timestamp=timestamp,
-                rows_affected=result["rows_affected"],
-                executed_on=master_host,
-                consistency_level="ALL",
-                latency_ms=round(latency_ms, 2),
-                quorum_achieved=False,
-                replica_caught_up=False
-            )
-        
-        # All replicas caught up
-        with metrics_lock:
-            consistency_metrics["ALL"]["count"] += 1
-            consistency_metrics["ALL"]["total_latency"] += latency_ms
-        
-        return QueryResponse(
-            success=True,
-            message=f"Write successful (consistency: ALL, timestamp: {timestamp}, all 3 replicas confirmed)",
-            timestamp=timestamp,
-            rows_affected=result["rows_affected"],
-            executed_on=master_host,
-            consistency_level="ALL",
-            latency_ms=round(latency_ms, 2),
-            quorum_achieved=True,
-            replica_caught_up=True
-        )
-
 
 async def handle_read_query(query: str, consistency: ConsistencyLevel) -> QueryResponse:
     """
     Handle a read query with tunable consistency.
     
-    Consistency Levels:
-    - ONE: Read from replica if healthy, otherwise master
-    - QUORUM/ALL: Read from master for strong consistency
-    
-    Args:
-        query: SQL read query
-        consistency: Desired consistency level
-        
-    Returns:
-        QueryResponse with query results and metrics
+    - EVENTUAL: Read from replica (fast, may be stale)
+    - STRONG: Read from master (guaranteed fresh)
     """
     start_time = time.time()
     
-    if consistency == ConsistencyLevel.ONE:
-        # Try replica first for load balancing
-        health_status = await check_replicas_health()
-        
+    if consistency == ConsistencyLevel.EVENTUAL:
+        # EVENTUAL: Try replica first (no health check overhead)
         with state_lock:
-            # Pick a healthy replica if available, otherwise use master
-            if current_replicas and health_status["healthy_count"] > 0:
-                # Pick a random replica for load balancing
-                replica = random.choice(current_replicas)
-                replica_host = replica["host"]
-            else:
-                replica_host = None
             master_host = current_master["host"]
+            replicas = current_replicas.copy()
         
-        if replica_host and health_status["healthy_count"] > 0:
+        # Try random replica, fallback to master on error
+        if replicas:
+            replica = random.choice(replicas)
+            replica_host = replica["host"]
+            
             result = execute_query_on_host(replica_host, query)
-            read_host = replica_host
+            
+            # Fallback to master if replica fails
+            if not result["success"]:
+                print(f"Replica read failed, using master: {result.get('error')}")
+                result = execute_query_on_host(master_host, query)
+                read_host = master_host
+            else:
+                read_host = replica_host
         else:
+            # No replicas available, use master
             result = execute_query_on_host(master_host, query)
             read_host = master_host
         
         if not result["success"]:
             with metrics_lock:
-                consistency_metrics["ONE"]["failures"] += 1
-            raise HTTPException(status_code=500, detail=f"Query failed: {result.get('error')}")
+                consistency_metrics["EVENTUAL"]["failures"] += 1
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Read failed: {result.get('error')}"
+            )
         
         latency_ms = (time.time() - start_time) * 1000
         
         with metrics_lock:
-            consistency_metrics["ONE"]["count"] += 1
-            consistency_metrics["ONE"]["total_latency"] += latency_ms
+            consistency_metrics["EVENTUAL"]["read_count"] += 1
+            consistency_metrics["EVENTUAL"]["read_latency"] += latency_ms
         
         return QueryResponse(
             success=True,
-            message="Read successful (consistency: ONE)",
+            message="Read successful (eventual consistency - data may be stale)",
             data=result["data"],
             rows_affected=len(result["data"]) if result["data"] else 0,
             executed_on=read_host,
-            consistency_level="ONE",
+            consistency_level="EVENTUAL",
             latency_ms=round(latency_ms, 2)
         )
     
-    else:  # QUORUM or ALL - read from master for strong consistency
+    else:  # ConsistencyLevel.STRONG
+        # STRONG: Read from master for guaranteed fresh data
         with state_lock:
             master_host = current_master["host"]
         
@@ -692,25 +671,27 @@ async def handle_read_query(query: str, consistency: ConsistencyLevel) -> QueryR
         
         if not result["success"]:
             with metrics_lock:
-                consistency_metrics[consistency.value]["failures"] += 1
-            raise HTTPException(status_code=500, detail=f"Query failed: {result.get('error')}")
+                consistency_metrics["STRONG"]["failures"] += 1
+            raise HTTPException(
+                status_code=500,
+                detail=f"Read failed: {result.get('error')}"
+            )
         
         latency_ms = (time.time() - start_time) * 1000
         
         with metrics_lock:
-            consistency_metrics[consistency.value]["count"] += 1
-            consistency_metrics[consistency.value]["total_latency"] += latency_ms
+            consistency_metrics["STRONG"]["read_count"] += 1
+            consistency_metrics["STRONG"]["read_latency"] += latency_ms
         
         return QueryResponse(
             success=True,
-            message=f"Read successful (consistency: {consistency.value})",
+            message="Read successful (strong consistency - latest data)",
             data=result["data"],
             rows_affected=len(result["data"]) if result["data"] else 0,
             executed_on=master_host,
-            consistency_level=consistency.value,
+            consistency_level="STRONG",
             latency_ms=round(latency_ms, 2)
         )
-
 
 @app.post("/query", response_model=QueryResponse)
 async def execute_query(request: QueryRequest):
@@ -761,28 +742,49 @@ async def get_status():
 
 @app.get("/consistency-metrics")
 async def get_consistency_metrics():
-    """Get consistency level performance metrics"""
+    """Get consistency level performance metrics with separate read/write latencies"""
     with metrics_lock:
         metrics_summary = {}
         for level, data in consistency_metrics.items():
-            avg_latency = (
-                data["total_latency"] / data["count"] 
-                if data["count"] > 0 
+            # Calculate average read latency
+            avg_read_latency = (
+                data["read_latency"] / data["read_count"] 
+                if data["read_count"] > 0 
                 else 0
             )
+            
+            # Calculate average write latency
+            avg_write_latency = (
+                data["write_latency"] / data["write_count"] 
+                if data["write_count"] > 0 
+                else 0
+            )
+            
+            # Calculate overall average
+            total_count = data["read_count"] + data["write_count"]
+            total_latency = data["read_latency"] + data["write_latency"]
+            avg_latency = (
+                total_latency / total_count
+                if total_count > 0
+                else 0
+            )
+            
             metrics_summary[level] = {
-                "count": data["count"],
+                "read_count": data["read_count"],
+                "write_count": data["write_count"],
+                "total_count": total_count,
+                "avg_read_latency_ms": round(avg_read_latency, 2),
+                "avg_write_latency_ms": round(avg_write_latency, 2),
                 "avg_latency_ms": round(avg_latency, 2),
                 "failures": data["failures"],
                 "quorum_not_achieved": data.get("quorum_not_achieved", 0),
                 "success_rate": (
-                    round((data["count"] / (data["count"] + data["failures"]) * 100), 2)
-                    if (data["count"] + data["failures"]) > 0
+                    round((total_count / (total_count + data["failures"]) * 100), 2)
+                    if (total_count + data["failures"]) > 0
                     else 100.0
                 )
             }
         return metrics_summary
-
 
 @app.get("/health")
 async def health_check():
@@ -1576,7 +1578,7 @@ async def stop_master_only(request: dict):
 class StressTestRequest(BaseModel):
     """Request model for stress tests"""
     num_operations: int = 50
-    consistency: ConsistencyLevel = ConsistencyLevel.QUORUM
+    consistency: ConsistencyLevel = ConsistencyLevel.STRONG
 
 
 class StressTestResult(BaseModel):
@@ -1623,13 +1625,21 @@ async def clear_test_data():
         
         # Reset consistency metrics
         with metrics_lock:
-            for level in consistency_metrics:
-                consistency_metrics[level] = {
-                    "count": 0, 
-                    "total_latency": 0.0, 
-                    "failures": 0,
-                    "quorum_not_achieved": 0
-                }
+            consistency_metrics["EVENTUAL"] = {
+                "read_count": 0,
+                "write_count": 0,
+                "read_latency": 0.0,
+                "write_latency": 0.0,
+                "failures": 0
+            }
+            consistency_metrics["STRONG"] = {
+                "read_count": 0,
+                "write_count": 0,
+                "read_latency": 0.0,
+                "write_latency": 0.0,
+                "failures": 0,
+                "quorum_not_achieved": 0
+            }
         
         return {
             "success": True,
@@ -1817,7 +1827,7 @@ async def stress_test_consistency_comparison(num_operations: int = 30):
     results = {}
     base_ts = int(time.time() * 1000)
     
-    for level in [ConsistencyLevel.ONE, ConsistencyLevel.QUORUM, ConsistencyLevel.ALL]:
+    for level in [ConsistencyLevel.EVENTUAL, ConsistencyLevel.STRONG]:
         latencies = []
         successful = 0
         errors = {}

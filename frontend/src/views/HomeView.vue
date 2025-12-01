@@ -264,10 +264,10 @@
             icon="pi pi-play"
           />
           <p class="run-description">
-            Will execute {{ stressTestOps }} {{ stressTestConsistency === 'ALL' ? 'sequential' : 'concurrent' }} INSERT operations with <strong>{{ stressTestConsistency }}</strong> consistency
+            Will execute {{ stressTestOps }} concurrent INSERT operations with <strong>{{ stressTestConsistency }}</strong> consistency
           </p>
-          <p v-if="stressTestConsistency === 'ALL'" class="consistency-warning">
-            ALL consistency runs operations one at a time (not concurrently) because each write waits for all 3 replicas to confirm. This demonstrates the latency tradeoff for maximum durability.
+          <p v-if="stressTestConsistency === 'STRONG'" class="consistency-info">
+            STRONG consistency waits for Cabinet-selected optimal replicas to confirm. Cabinet intelligently chooses the fastest, healthiest replicas for the quorum.
           </p>
         </div>
 
@@ -385,17 +385,13 @@
               </div>
             </div>
             <div class="latency-explanation">
-              <p v-if="stressTestConsistency === 'ONE'">
-                <strong>ONE consistency:</strong> Fast because we only wait for the master to confirm. 
+              <p v-if="stressTestConsistency === 'EVENTUAL'">
+                <strong>EVENTUAL consistency:</strong> Fast because we only wait for the master to confirm. 
                 Replicas receive the write via binlog replication asynchronously.
               </p>
-              <p v-else-if="stressTestConsistency === 'QUORUM'">
-                <strong>QUORUM consistency:</strong> Moderate latency because we wait for 2 out of 3 replicas 
-                to confirm they've received the write before returning success.
-              </p>
               <p v-else>
-                <strong>ALL consistency:</strong> Highest latency because we wait for all 3 replicas to confirm. 
-                This ensures maximum durability but reduces availability.
+                <strong>STRONG consistency:</strong> Moderate latency because we wait for Cabinet-selected 
+                optimal replicas to confirm they've received the write before returning success.
               </p>
             </div>
           </div>
@@ -439,11 +435,8 @@
           <!-- What Happened -->
           <div class="what-happened">
             <h5>What Just Happened?</h5>
-            <ol class="step-list">
-              <li v-if="stressTestConsistency === 'ALL'">
-                <strong>{{ stressTestResult.total_operations }} INSERT requests</strong> were sent sequentially (one at a time) to the coordinator
-              </li>
-              <li v-else>
+           <ol class="step-list">
+              <li>
                 <strong>{{ stressTestResult.total_operations }} concurrent INSERT requests</strong> were sent to the coordinator
               </li>
               <li>
@@ -452,14 +445,11 @@
               <li>
                 Writes were executed on the <strong>master MySQL instance</strong>
               </li>
-              <li v-if="stressTestConsistency === 'ONE'">
-                With ONE consistency, we returned success immediately after master confirmed
-              </li>
-              <li v-else-if="stressTestConsistency === 'QUORUM'">
-                With QUORUM, we waited for <strong>2 of 3 replicas</strong> to catch up via binlog replication
+              <li v-if="stressTestConsistency === 'EVENTUAL'">
+                With EVENTUAL consistency, we returned success immediately after master confirmed
               </li>
               <li v-else>
-                With ALL, we waited for <strong>all 3 replicas</strong> to confirm before proceeding to the next write (this is why it's slower)
+                With STRONG consistency, we waited for <strong>Cabinet-selected optimal replicas</strong> to catch up via binlog replication
               </li>
               <li>
                 Data now exists on master and is being replicated to all replicas
@@ -534,7 +524,7 @@ const failoverResult = ref<any>(null)
 // Stress Test State
 const stressTestRunning = ref<string | null>(null)
 const stressTestOps = ref(50)
-const stressTestConsistency = ref('QUORUM')
+const stressTestConsistency = ref('STRONG')
 const stressTestResult = ref<any>(null)
 const dataCount = ref({ users: 0, products: 0, total: 0 })
 const clearingData = ref(false)
@@ -548,9 +538,8 @@ const recentOperations = ref<any[]>([])
 let progressTimer: any = null
 
 const consistencyOptions = [
-  { label: 'ONE - Eventual', value: 'ONE', shortDesc: 'Fast, async replication' },
-  { label: 'QUORUM - Strong', value: 'QUORUM', shortDesc: '2/3 replicas confirm' },
-  { label: 'ALL - Strongest', value: 'ALL', shortDesc: 'All 3 must confirm (slow)' }
+  { label: 'EVENTUAL', value: 'EVENTUAL', shortDesc: 'Fast, async replication' },
+  { label: 'STRONG', value: 'STRONG', shortDesc: 'Cabinet quorum confirms' }
 ]
 
 let refreshInterval: any = null
@@ -976,7 +965,8 @@ const runStressTest = async () => {
     try {
       // Add timeout - ALL consistency can take longer (waiting for all replicas)
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), consistency === 'ALL' ? 15000 : 10000)
+      const timeoutId = setTimeout(() => controller.abort(), consistency === 'STRONG' ? 12000 : 8000)
+
       
       const response = await fetch(`${API_BASE}/query`, {
         method: 'POST',
@@ -999,7 +989,7 @@ const runStressTest = async () => {
         liveStats.value.failed++
         // Better error messages for common issues
         let errorMsg = result.detail || result.error || 'Unknown error'
-        if (errorMsg.includes('Not enough healthy replicas')) {
+        if (errorMsg.includes('Not enough healthy replicas') || errorMsg.includes('Cabinet quorum')) {
           errorMsg = 'Not enough healthy replicas for ' + consistency + ' consistency'
         }
         errors[errorMsg] = (errors[errorMsg] || 0) + 1
@@ -1013,8 +1003,8 @@ const runStressTest = async () => {
       // Provide meaningful error messages
       let errorMsg = 'Connection failed'
       if (error.name === 'AbortError') {
-        errorMsg = consistency === 'ALL' 
-          ? 'Timeout: Waiting for all replicas took too long'
+        errorMsg = consistency === 'STRONG' 
+          ? 'Timeout: Waiting for Cabinet quorum took too long'
           : 'Request timeout'
       } else if (error.message?.includes('fetch')) {
         errorMsg = 'Backend not reachable - is the server running?'
@@ -1032,25 +1022,17 @@ const runStressTest = async () => {
   }
   
   // Execute operations based on consistency level
-  // ALL: Run sequentially (one at a time) - backend waits for all replicas which is slow
-  // QUORUM: Small batches of 3
-  // ONE: Larger batches of 10
-  if (consistency === 'ALL') {
-    // Sequential execution for ALL - prevents backend overload
-    for (let i = 0; i < numOps; i++) {
-      await runOperation(i)
+  // STRONG: Small batches to avoid overwhelming Cabinet
+  // EVENTUAL: Larger batches for maximum throughput
+  const batchSize = consistency === 'STRONG' ? 5 : 20
+  for (let i = 0; i < numOps; i += batchSize) {
+    const batch = []
+    for (let j = i; j < Math.min(i + batchSize, numOps); j++) {
+      batch.push(runOperation(j))
     }
-  } else {
-    const batchSize = consistency === 'QUORUM' ? 3 : 10
-    for (let i = 0; i < numOps; i += batchSize) {
-      const batch = []
-      for (let j = i; j < Math.min(i + batchSize, numOps); j++) {
-        batch.push(runOperation(j))
-      }
-      await Promise.all(batch)
-    }
+    await Promise.all(batch)
   }
-  
+    
   stopProgressTimer()
   
   const duration = (Date.now() - startTime) / 1000
@@ -1699,19 +1681,14 @@ onUnmounted(() => {
   margin-top: 0.25rem;
 }
 
-.consistency-btn.one.active {
+.consistency-btn.eventual.active {
   background: #059669 !important;
   border-color: #059669 !important;
 }
 
-.consistency-btn.quorum.active {
+.consistency-btn.strong.active {
   background: #2563eb !important;
   border-color: #2563eb !important;
-}
-
-.consistency-btn.all.active {
-  background: #d97706 !important;
-  border-color: #d97706 !important;
 }
 
 /* Run Test Section */
@@ -2215,16 +2192,12 @@ onUnmounted(() => {
   border: 1px solid #e5e7eb;
 }
 
-.stat-card.one {
+.stat-card.eventual {
   border-top: 3px solid #10b981;
 }
 
-.stat-card.quorum {
+.stat-card.strong {
   border-top: 3px solid #3b82f6;
-}
-
-.stat-card.all {
-  border-top: 3px solid #f59e0b;
 }
 
 .stat-header {
@@ -2239,9 +2212,8 @@ onUnmounted(() => {
   font-size: 0.9rem;
 }
 
-.stat-card.one .stat-level { color: #059669; }
-.stat-card.quorum .stat-level { color: #2563eb; }
-.stat-card.all .stat-level { color: #d97706; }
+.stat-card.eventual .stat-level { color: #059669; }
+.stat-card.strong .stat-level { color: #2563eb; }
 
 .stat-count {
   font-size: 0.75rem;
@@ -2275,6 +2247,16 @@ onUnmounted(() => {
 
 .stat-row .bad {
   color: #dc2626;
+}
+
+.consistency-info {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: #2563eb;
+  background: #dbeafe;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid #93c5fd;
 }
 
 /* Responsive */
