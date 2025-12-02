@@ -1035,17 +1035,12 @@ const runStressTest = async () => {
     progressPercent.value = Math.round((liveStats.value.completed / numOps) * 100)
   }
   
-  // Execute operations based on consistency level
-  // STRONG: Small batches to avoid overwhelming Cabinet
-  // EVENTUAL: Larger batches for maximum throughput
-  const batchSize = consistency === 'STRONG' ? 5 : 20
-  for (let i = 0; i < numOps; i += batchSize) {
-    const batch = []
-    for (let j = i; j < Math.min(i + batchSize, numOps); j++) {
-      batch.push(runOperation(j))
-    }
-    await Promise.all(batch)
+  // Execute all operations concurrently
+  const operations = []
+  for (let i = 0; i < numOps; i++) {
+    operations.push(runOperation(i))
   }
+  await Promise.all(operations)
     
   stopProgressTimer()
   
