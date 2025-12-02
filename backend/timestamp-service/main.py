@@ -55,6 +55,27 @@ async def get_timestamp():
     return TimestampResponse(timestamp=timestamp, server_id=SERVER_ID)
 
 
+@app.post("/reset")
+async def reset_counter():
+    """
+    Reset the timestamp counter to its initial value.
+    Called when clearing data to ensure timestamps start fresh.
+    
+    Returns:
+        Dictionary with reset confirmation and new counter value
+    """
+    global current_counter
+    
+    with counter_lock:
+        current_counter = START_VALUE
+    
+    return {
+        "status": "reset",
+        "server_id": SERVER_ID,
+        "current_counter": current_counter
+    }
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""

@@ -305,6 +305,19 @@ async def get_cabinet_quorum() -> List[str]:
             detail=f"Failed to get Cabinet quorum: {str(e)}"
         )
 
+def check_replica_timestamp_sync(replica_host: str, timestamp: int) -> bool:
+    """
+    Check if a replica has caught up to the given timestamp.
+    This is a synchronous helper for parallel execution.
+    """
+    try:
+        replica_timestamp = get_last_applied_timestamp(replica_host)
+        return replica_timestamp >= timestamp
+    except Exception as e:
+        print(f"Error checking replica timestamp: {e}")
+        return False
+
+
 async def wait_for_quorum_catchup(
     timestamp: int, 
     quorum_replicas: List[str], 
@@ -312,6 +325,7 @@ async def wait_for_quorum_catchup(
 ) -> dict:
     """
     Post-write verification: Wait for Cabinet-selected quorum replicas to catch up.
+    Uses parallel checking for better performance.
     
     Args:
         timestamp: Target timestamp to wait for
@@ -328,19 +342,37 @@ async def wait_for_quorum_catchup(
     
     # Only monitor the Cabinet-selected replicas
     target_replicas = [(rid, replica_map[rid]) for rid in quorum_replicas if rid in replica_map]
-    caught_up_replicas = []
+    
+    if not target_replicas:
+        return {
+            "quorum_achieved": False,
+            "caught_up_count": 0,
+            "caught_up_replicas": []
+        }
+    
+    loop = asyncio.get_event_loop()
     
     while (time.time() - start_time) < timeout_seconds:
-        caught_up_replicas = []
+        # Check all replicas in parallel using thread pool
+        check_tasks = [
+            loop.run_in_executor(
+                None,
+                check_replica_timestamp_sync,
+                replica_host,
+                timestamp
+            )
+            for replica_id, replica_host in target_replicas
+        ]
         
-        for replica_id, replica_host in target_replicas:
-            try:
-                replica_timestamp = get_last_applied_timestamp(replica_host)
-                
-                if replica_timestamp >= timestamp:
-                    caught_up_replicas.append(replica_id)
-            except Exception as e:
-                print(f"Error checking replica {replica_id} timestamp: {e}")
+        # Wait for all checks to complete in parallel
+        results = await asyncio.gather(*check_tasks, return_exceptions=True)
+        
+        # Collect caught up replicas
+        caught_up_replicas = [
+            target_replicas[i][0]  # replica_id
+            for i, result in enumerate(results)
+            if result is True
+        ]
         
         # Check if all Cabinet-selected replicas caught up
         if len(caught_up_replicas) >= len(target_replicas):
@@ -350,10 +382,27 @@ async def wait_for_quorum_catchup(
                 "caught_up_replicas": caught_up_replicas
             }
         
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)  # Shorter sleep for faster response
+    
+    # Final check after timeout
+    check_tasks = [
+        loop.run_in_executor(
+            None,
+            check_replica_timestamp_sync,
+            replica_host,
+            timestamp
+        )
+        for replica_id, replica_host in target_replicas
+    ]
+    results = await asyncio.gather(*check_tasks, return_exceptions=True)
+    caught_up_replicas = [
+        target_replicas[i][0]
+        for i, result in enumerate(results)
+        if result is True
+    ]
     
     return {
-        "quorum_achieved": False,
+        "quorum_achieved": len(caught_up_replicas) >= len(target_replicas),
         "caught_up_count": len(caught_up_replicas),
         "caught_up_replicas": caught_up_replicas
     }
@@ -907,24 +956,16 @@ async def trigger_failover(request: FailoverRequest):
             
             old_master_container = current_master["container"]
             old_master_id = current_master["id"]
+            old_master_host = current_master["host"]
             new_master_container = target_replica["container"]
             new_master_host = target_replica["host"]
             new_master_id = target_replica["id"]
+            # Get list of other replicas that need to be reconfigured
+            other_replicas = [r for r in current_replicas if r["id"] != new_master_id]
 
         print(f"Triggering graceful failover from {old_master_id} to {new_master_id}...")
 
-        # Step 1: Demote current master to replica of new master
-        # Note: We need to promote the new master first so it can accept connections? 
-        # Actually, usually we promote new master, then demote old master.
-        # But if we promote new master first, we might have split brain for a moment.
-        # Safe sequence:
-        # 1. Set old master read-only (demote script does this)
-        # 2. Promote new master (reset slave, read-write)
-        # 3. Configure old master to replicate from new master
-        
-        # Let's use our scripts. 
-        
-        # 1. Promote new master
+        # Step 1: Promote new master first
         promotion_success = await promote_replica_to_master(new_master_container)
         if not promotion_success:
              return {
@@ -933,20 +974,49 @@ async def trigger_failover(request: FailoverRequest):
                 "error": "Promotion failed"
             }
             
-        # 2. Demote old master
+        # Step 2: Demote old master to replica of new master
         demotion_success = await demote_master_to_replica(old_master_container, new_master_host)
         if not demotion_success:
              # This is bad, we have two masters or old master is in weird state.
              # But new master is active, so we can proceed with state update.
              print("Warning: Failed to demote old master, but new master is promoted.")
         
-        # Step 3: Update global state
+        # Step 3: Reconfigure ALL other replicas to point to new master
+        # This is critical for subsequent failovers to work
+        for replica in other_replicas:
+            print(f"Reconfiguring {replica['id']} to replicate from new master {new_master_host}...")
+            try:
+                reconfigure_sql = f"""
+                    STOP SLAVE;
+                    RESET SLAVE ALL;
+                    CHANGE MASTER TO
+                        MASTER_HOST='{new_master_host}',
+                        MASTER_USER='replicator',
+                        MASTER_PASSWORD='replicator_password',
+                        MASTER_AUTO_POSITION=1,
+                        GET_MASTER_PUBLIC_KEY=1;
+                    START SLAVE;
+                """
+                result = subprocess.run(
+                    ["docker", "exec", replica["container"], "mysql", "-u", "root", "-prootpass", "-e", reconfigure_sql],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode != 0:
+                    print(f"Warning: Failed to reconfigure {replica['id']}: {result.stderr}")
+                else:
+                    print(f"Successfully reconfigured {replica['id']}")
+            except Exception as e:
+                print(f"Warning: Error reconfiguring {replica['id']}: {e}")
+        
+        # Step 4: Update global state
         with state_lock:
-            old_master_obj = current_master
-            current_master = target_replica
+            old_master_obj = current_master.copy()
+            current_master = target_replica.copy()
             
             # Update replicas list: remove new master, add old master
-            current_replicas = [r for r in current_replicas if r["id"] != new_master_id]
+            current_replicas = [r.copy() for r in current_replicas if r["id"] != new_master_id]
             current_replicas.append(old_master_obj)
             
         return {
@@ -1601,7 +1671,7 @@ class StressTestResult(BaseModel):
 async def clear_test_data():
     """
     Clear all test data from the database (users and products tables).
-    Keeps the schema intact.
+    Keeps the schema intact. Also resets timestamp services.
     """
     try:
         with state_lock:
@@ -1641,11 +1711,25 @@ async def clear_test_data():
                 "quorum_not_achieved": 0
             }
         
+        # Reset timestamp services to start from the beginning
+        timestamp_reset_success = True
+        async with httpx.AsyncClient() as client:
+            for service_url in TIMESTAMP_SERVICES:
+                try:
+                    response = await client.post(f"{service_url}/reset", timeout=5.0)
+                    if response.status_code != 200:
+                        print(f"Warning: Failed to reset timestamp service {service_url}")
+                        timestamp_reset_success = False
+                except Exception as e:
+                    print(f"Warning: Could not reset timestamp service {service_url}: {e}")
+                    timestamp_reset_success = False
+        
         return {
             "success": True,
             "message": f"Cleared {users_deleted} users and {products_deleted} products",
             "users_deleted": users_deleted,
-            "products_deleted": products_deleted
+            "products_deleted": products_deleted,
+            "timestamp_reset": timestamp_reset_success
         }
     except Exception as e:
         return {

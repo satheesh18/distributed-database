@@ -57,7 +57,7 @@
 
         <!-- Replica Nodes -->
         <div class="topology-replicas">
-          <div v-for="replica in metrics" :key="replica.replica_id" class="node-card replica" :class="{ unhealthy: !replica.is_healthy }">
+          <div v-for="replica in filteredReplicas" :key="replica.replica_id" class="node-card replica" :class="{ unhealthy: !replica.is_healthy }">
             <div class="node-badge">REPLICA</div>
             <div class="node-id">{{ replica.replica_id }}</div>
             
@@ -407,7 +407,7 @@
                 </div>
                 <div class="ts-arrow">
                   <div class="arrow-line"></div>
-                  <span class="arrow-label">{{ stressTestResult.total_operations }} operations</span>
+                  <span class="arrow-label">{{ stressTestResult.successful }} successful writes</span>
                 </div>
                 <div class="ts-end">
                   <span class="ts-label">Last</span>
@@ -415,8 +415,11 @@
                 </div>
               </div>
               <p class="timestamp-explanation">
-                Each write received a unique, monotonically increasing timestamp from our distributed timestamp services.
-                This ensures global ordering even with concurrent writes from multiple clients.
+                <strong>Note:</strong> The timestamp gap ({{ stressTestResult.timestamp_range.max - stressTestResult.timestamp_range.min + 1 }} values for {{ stressTestResult.successful }} writes) 
+                is expected because we use <strong>two timestamp servers</strong> with an odd/even pattern: 
+                Server 1 assigns odd timestamps (1, 3, 5...) and Server 2 assigns even timestamps (2, 4, 6...).
+                Requests are load-balanced between servers, so not all numbers in the sequence are used.
+                This ensures globally unique, monotonically increasing timestamps across distributed clients.
               </p>
             </div>
           </div>
@@ -491,7 +494,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import ProgressBar from 'primevue/progressbar'
 
 const API_BASE = 'http://localhost:9000'
@@ -514,6 +517,13 @@ const services = ref([
 const metrics = ref<any[]>([])
 const masterTimestamp = ref<number>(0)
 const systemStatus = ref<any>({})
+
+// Computed property to filter out master from replicas
+const filteredReplicas = computed(() => {
+  const masterId = systemStatus.value?.current_master?.id
+  if (!masterId) return metrics.value
+  return metrics.value.filter(replica => replica.replica_id !== masterId)
+})
 
 // Failover State
 const failoverInProgress = ref(false)

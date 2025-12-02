@@ -17,6 +17,7 @@ import threading
 from typing import Dict, List
 from datetime import datetime
 import mysql.connector
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -35,6 +36,7 @@ app.add_middleware(
 # Configuration
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "rootpass")
 MYSQL_MASTER_HOST = os.getenv("MYSQL_MASTER_HOST", "mysql-instance-1")
+COORDINATOR_URL = os.getenv("COORDINATOR_URL", "http://coordinator:8000")
 
 # All MySQL instances (including master for health tracking)
 MYSQL_INSTANCES = [
@@ -55,6 +57,10 @@ MYSQL_REPLICAS = [
 # Global metrics storage
 metrics_lock = threading.Lock()
 replica_metrics: Dict[str, dict] = {}
+
+# Track current master (updated by querying coordinator)
+current_master_host = MYSQL_MASTER_HOST
+current_master_lock = threading.Lock()
 
 
 class ReplicaMetrics(BaseModel):
@@ -192,6 +198,34 @@ def get_replication_status(host: str) -> dict:
         return {}
 
 
+def update_current_master():
+    """
+    Query the coordinator to get the current master.
+    This ensures we calculate replication lag against the actual current master.
+    """
+    global current_master_host
+    
+    try:
+        # Use synchronous request since this is called from a background thread
+        import urllib.request
+        import json
+        
+        req = urllib.request.Request(f"{COORDINATOR_URL}/status", method='GET')
+        req.add_header('Content-Type', 'application/json')
+        
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read().decode())
+            new_master_host = data.get("current_master", {}).get("host")
+            
+            if new_master_host:
+                with current_master_lock:
+                    current_master_host = new_master_host
+                    
+    except Exception as e:
+        # If coordinator is unavailable, keep using the last known master
+        print(f"Could not update current master from coordinator: {e}")
+
+
 def collect_metrics():
     """
     Background task to collect metrics from all MySQL instances.
@@ -215,16 +249,22 @@ def collect_metrics():
     
     while True:
         try:
-            # First, try to get master timestamp from the original master
-            master_timestamp = get_last_applied_timestamp(MYSQL_MASTER_HOST)
+            # Update current master from coordinator (handles failover)
+            update_current_master()
             
-            # If original master is down, try to find another healthy instance for timestamp
+            # Get the current master host
+            with current_master_lock:
+                master_host = current_master_host
+            
+            # Get master timestamp from the CURRENT master (not hardcoded instance-1)
+            master_timestamp = get_last_applied_timestamp(master_host)
+            
+            # If current master is down, try to find highest timestamp from any healthy instance
             if master_timestamp == 0:
                 for instance in MYSQL_INSTANCES:
-                    if instance["host"] != MYSQL_MASTER_HOST:
-                        ts = get_last_applied_timestamp(instance["host"])
-                        if ts > master_timestamp:
-                            master_timestamp = ts
+                    ts = get_last_applied_timestamp(instance["host"])
+                    if ts > master_timestamp:
+                        master_timestamp = ts
             
             # Collect metrics for ALL instances
             for instance in MYSQL_INSTANCES:
@@ -237,7 +277,7 @@ def collect_metrics():
                 # Get instance's last applied timestamp
                 instance_timestamp = get_last_applied_timestamp(host)
                 
-                # Calculate replication lag (relative to the highest known timestamp)
+                # Calculate replication lag (relative to the current master's timestamp)
                 lag = max(0, master_timestamp - instance_timestamp) if master_timestamp > 0 else 0
                 
                 with metrics_lock:
@@ -304,16 +344,18 @@ async def get_all_metrics():
                 is_healthy=metrics["is_healthy"]
             ))
         
-        # Try to get master timestamp from the original master first
-        master_timestamp = get_last_applied_timestamp(MYSQL_MASTER_HOST)
+        # Get master timestamp from the CURRENT master
+        with current_master_lock:
+            master_host = current_master_host
         
-        # If original master is down, find the highest timestamp from healthy instances
+        master_timestamp = get_last_applied_timestamp(master_host)
+        
+        # If current master is down, find the highest timestamp from any instance
         if master_timestamp == 0:
             for instance in MYSQL_INSTANCES:
-                if instance["host"] != MYSQL_MASTER_HOST:
-                    ts = get_last_applied_timestamp(instance["host"])
-                    if ts > master_timestamp:
-                        master_timestamp = ts
+                ts = get_last_applied_timestamp(instance["host"])
+                if ts > master_timestamp:
+                    master_timestamp = ts
         
         return MetricsResponse(replicas=replicas, master_timestamp=master_timestamp)
 
