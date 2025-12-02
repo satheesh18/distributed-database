@@ -689,15 +689,19 @@ const electLeaderOnly = async () => {
   failoverResult.value = null
   
   try {
+    // Get current master ID to exclude from election
+    const currentMasterId = systemStatus.value.current_master?.id || 'instance-1'
+    
     failoverFlow.value.push({
       title: 'Initiating SEER Algorithm',
-      detail: 'Analyzing replicas to select optimal leader based on latency, lag, and stability...'
+      detail: `Analyzing replicas to select optimal leader (excluding current master: ${currentMasterId})...`
     })
     
+    // Exclude current master from leader election candidates
     const seerResponse = await fetch('http://localhost:9005/elect-leader', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
+      body: JSON.stringify({ exclude_replicas: [currentMasterId] })
     })
     const seerData = await seerResponse.json()
     
