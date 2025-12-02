@@ -57,7 +57,7 @@ San Jos\'e State University\\
 \begin{abstract}
 This report presents the design, implementation, and evaluation of a distributed MySQL database system that addresses key challenges in distributed systems: consistency, fault tolerance, and performance optimization. Modern distributed databases must balance competing requirements: strong consistency for correctness, high availability for user experience, and low latency for performance. Our system implements three core algorithms drawn from recent research: (1) Timestamp as a Service for globally ordered writes without centralized coordination, enabling total ordering of operations while eliminating single points of failure; (2) Cabinet algorithm for adaptive quorum-based replication that dynamically selects the fastest and healthiest replicas, reducing write latency by up to 40\% compared to static configurations; and (3) SEER algorithm for performance-aware leader election during master failures, selecting new leaders based on latency, stability, and replication lag rather than arbitrary criteria.
 
-The system is built using Docker containers with a FastAPI-based coordinator, four MySQL 8.0 instances (one master and three replicas), and dedicated microservices for metrics collection, quorum selection, and leader election. We provide tunable consistency levels (ONE, QUORUM, ALL) that allow applications to trade off between latency and durability based on their specific requirements. Our evaluation demonstrates that the adaptive approach reduces average write latency from 67ms (ALL) to 35ms (QUORUM with Cabinet), while maintaining strong consistency guarantees through quorum intersection. The system successfully handles master failures with automatic promotion of the best-performing replica, completing failover in 6-8 seconds with minimal data loss. Our implementation serves as both an educational tool for understanding distributed systems concepts and a foundation for production-grade distributed database research.
+The system is built using Docker containers with a FastAPI-based coordinator, four MySQL 8.0 instances (one master and three replicas), and dedicated microservices for metrics collection, quorum selection, and leader election. We provide tunable consistency levels (Strong and Eventual) that allow applications to trade off between consistency and latency based on their specific requirements. Strong consistency uses Cabinet's quorum-based replication, while Eventual consistency writes only to the master for minimum latency. Our evaluation demonstrates that the adaptive approach with Strong consistency achieves 35ms average write latency while maintaining consistency guarantees through quorum intersection, compared to 18ms for Eventual consistency. The system successfully handles master failures with automatic promotion of the best-performing replica, completing failover in 6-8 seconds with minimal data loss. Our implementation serves as both an educational tool for understanding distributed systems concepts and a foundation for production-grade distributed database research.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -118,7 +118,7 @@ At a high level, the project goals are:
     
     \item \textbf{Automatic Failure Handling}: Demonstrate automatic handling of server failures without manual intervention. The system should detect failures within seconds, elect new leaders when necessary, and continue serving requests with minimal disruption.
     
-    \item \textbf{Tunable Consistency}: Expose tunable consistency and performance trade-offs that can be observed in experiments. Users should be able to choose between latency (ONE), balanced (QUORUM), and durability (ALL) modes based on their application requirements.
+    \item \textbf{Tunable Consistency}: Expose tunable consistency and performance trade-offs that can be observed in experiments. Users should be able to choose between Strong consistency (Cabinet quorum-based) and Eventual consistency (master-only) modes based on their application requirements.
     
     \item \textbf{Educational Value}: Create a system that is both functional and educational. The codebase should be readable, well-documented, and structured to help students understand distributed systems concepts through working code.
 \end{itemize}
@@ -144,7 +144,7 @@ Leader Election & SEER service + coordinator failover \\
 \hline
 Failure Handling & Metrics collector + health checks \\
 \hline
-Tunable Consistency & ONE/QUORUM/ALL in /query API \\
+Tunable Consistency & Strong/Eventual in /query API \\
 \hline
 \end{tabular}
 \label{tab:goals-mapping}
@@ -203,15 +203,14 @@ The system handles concurrent operations through multiple complementary mechanis
 The combination of these mechanisms allows our system to process concurrent requests efficiently while maintaining strong consistency guarantees. In our experiments, we observed linear throughput scaling up to 100 concurrent clients before the single coordinator became a bottleneck.
 
 \subsection{Quality of Service}
-We provide tunable consistency levels (ONE, QUORUM, ALL) that allow users to trade off between latency and consistency based on their requirements. Each level offers different guarantees:
+We provide tunable consistency levels (Strong and Eventual) that allow users to trade off between consistency and latency based on their requirements. Each level offers different guarantees:
 
 \begin{itemize}
-    \item \textbf{ONE}: Offers the lowest latency by returning as soon as the master acknowledges the write. Suitable for applications where eventual consistency is acceptable, such as logging or analytics workloads.
-    \item \textbf{QUORUM}: Provides a balance between latency and durability by waiting for a majority of replicas to acknowledge. This is the recommended default for most applications, as it tolerates single-node failures without data loss.
-    \item \textbf{ALL}: Ensures maximum durability by waiting for all replicas, but incurs the highest latency. Appropriate for critical financial transactions or compliance-sensitive operations.
+    \item \textbf{Eventual}: Offers the lowest latency by returning as soon as the master acknowledges the write. Replication to replicas happens asynchronously. Suitable for applications where eventual consistency is acceptable, such as logging or analytics workloads.
+    \item \textbf{Strong}: Provides strong consistency guarantees by using Cabinet's quorum-based replication. The system waits for acknowledgments from a majority of replicas selected by the Cabinet algorithm, ensuring that data is durably replicated before returning success. This is the recommended mode for applications requiring consistency, as it tolerates single-node failures without data loss.
 \end{itemize}
 
-The Cabinet algorithm enhances quality of service by ensuring writes go to the fastest available replicas within each consistency level. Even when using QUORUM consistency, the system preferentially selects low-latency, low-lag replicas, reducing average response times compared to random replica selection.
+The Cabinet algorithm enhances quality of service for Strong consistency by ensuring writes go to the fastest available replicas. The system preferentially selects low-latency, low-lag replicas for the quorum, reducing average response times compared to random replica selection.
 
 \subsection{Scalability}
 The architecture supports horizontal scaling through several design choices:
@@ -256,7 +255,7 @@ Consistency and replication are at the heart of distributed database design. We 
 
 \textbf{Cabinet: Dynamically Weighted Consensus (arXiv 2025)} \cite{cabinet} introduces weighted quorums where replicas are weighted based on their performance characteristics. The traditional quorum approach treats all replicas as equivalent and waits for any majority to acknowledge a write. Cabinet observes that replicas often have heterogeneous performance-some may be on faster hardware, closer to the client, or more up-to-date with replication. By weighting replicas based on latency, lag, and historical reliability, the system can select the optimal subset for each quorum, reducing write latency without sacrificing safety. We implement this algorithm for our write quorum selection, computing weights as the inverse of latency plus lag and selecting the top-weighted replicas that form a majority.
 
-\textbf{A Unified Summary of Non-Transactional Consistency Levels (arXiv 2024)} \cite{consistency} provides a framework to define and reason about consistency levels including linearizability, eventual consistency, and bounded staleness. The paper introduces a taxonomy that maps informal consistency level names used in practice (e.g., ``strong,'' ``session,'' ``eventual'') to precise formal definitions based on visibility and ordering guarantees. This informed our implementation of tunable consistency levels, helping us ensure that our ONE, QUORUM, and ALL modes provide well-defined semantics that users can reason about.
+\textbf{A Unified Summary of Non-Transactional Consistency Levels (arXiv 2024)} \cite{consistency} provides a framework to define and reason about consistency levels including linearizability, eventual consistency, and bounded staleness. The paper introduces a taxonomy that maps informal consistency level names used in practice (e.g., ``strong,'' ``session,'' ``eventual'') to precise formal definitions based on visibility and ordering guarantees. This informed our implementation of tunable consistency levels, helping us ensure that our Strong and Eventual modes provide well-defined semantics that users can reason about.
 
 \subsection{Leader Election}
 
@@ -295,18 +294,17 @@ The \texttt{/query} endpoint accepts a JSON payload:
 \begin{lstlisting}[language=json,caption=Client API for Query Execution]
 {
   "sql": "SELECT * FROM users WHERE id = 1",
-  "consistency": "ONE | QUORUM | ALL"
+  "consistency": "strong | eventual"
 }
 \end{lstlisting}
 
 The \texttt{consistency} field controls how the coordinator treats the operation:
 \begin{itemize}
-    \item \textbf{ONE}: For writes, the coordinator waits only for the master to apply the update before replying. Replication to replicas happens asynchronously. For reads, the coordinator may route to any healthy replica, even if it is slightly behind. This minimizes latency but allows bounded staleness.
-    \item \textbf{QUORUM}: For writes, the coordinator waits for acknowledgments from a majority of replicas (including the master). For reads, it prefers replicas whose last-applied timestamp is at least as recent as the quorum-committed timestamp, providing strong read-after-write consistency for most clients.
-    \item \textbf{ALL}: For writes, the coordinator waits for acknowledgments from all replicas. For reads, it only routes to replicas whose metadata timestamp matches the latest committed timestamp on the master. This maximizes consistency at the cost of higher latency.
+    \item \textbf{Eventual}: For writes, the coordinator waits only for the master to apply the update before replying. Replication to replicas happens asynchronously. For reads, the coordinator may route to any healthy replica, even if it is slightly behind. This minimizes latency but allows bounded staleness.
+    \item \textbf{Strong}: For writes, the coordinator uses Cabinet's quorum-based replication, waiting for acknowledgments from a majority of replicas selected based on performance metrics. For reads, it prefers replicas whose last-applied timestamp is at least as recent as the quorum-committed timestamp, providing strong read-after-write consistency.
 \end{itemize}
 
-Formally, we treat QUORUM and ALL as providing linearizable semantics for single-key operations as long as a majority of replicas remain connected. ONE provides eventual consistency, and the experiments in Section~VIII show the expected latency/consistency trade-off across these modes.
+Formally, Strong consistency provides linearizable semantics for single-key operations as long as a majority of replicas remain connected. Eventual consistency provides lower latency at the cost of potential staleness, and the experiments in Section~VIII show the expected latency/consistency trade-off across these modes.
 
 \subsection{Read Routing Algorithm}
 
@@ -326,7 +324,7 @@ def route_read(sql, consistency):
         if not replica.is_healthy:
             continue
         # Enforce freshness based on mode
-        if consistency in ("QUORUM", "ALL"):
+        if consistency == "strong":
             if replica.last_ts < metrics.master_last_ts:
                 continue
         candidates.append(replica)
@@ -338,7 +336,7 @@ def route_read(sql, consistency):
     return execute_sql_on(target, sql)
 \end{lstlisting}
 
-This algorithm is $O(n)$ in the number of replicas and ensures that, under QUORUM and ALL, reads observe at least the master's most recent committed timestamp whenever a suitable replica exists. Under ONE, we relax the timestamp filter and instead emphasize latency, which is consistent with the weaker guarantees of eventual consistency.
+This algorithm is $O(n)$ in the number of replicas and ensures that, under Strong consistency, reads observe at least the master's most recent committed timestamp whenever a suitable replica exists. Under Eventual consistency, we relax the timestamp filter and instead emphasize latency, which is consistent with the weaker guarantees.
 
 \subsection{Failure Detection and Health Monitoring}
 
@@ -1024,7 +1022,7 @@ Figure~\ref{fig:object} shows an object diagram representing a snapshot of the s
     \node[font=\footnotesize, text decoration=underline] at (0,0.7) {\underline{coord1:Coordinator}};
     \draw[thick] (-1.75,-0.1) -- (1.75,-0.1);
     \node[font=\tiny, align=left] at (0,-0.4) {current\_master = ``mysql-master''};
-    \node[font=\tiny, align=left] at (0,-0.8) {consistency = ``QUORUM''};
+    \node[font=\tiny, align=left] at (0,-0.8) {consistency = ``strong''};
     
     % Timestamp instance
     \node[rectangle, draw, fill=green!15, minimum width=3cm, minimum height=1.5cm] (ts) at (-3.5,-2.5) {};
@@ -1115,7 +1113,7 @@ Figure~\ref{fig:activity} shows the activity diagram for a write operation, illu
 
 \subsection{Successful Write Scenario}
 
-\textbf{Scenario}: Client executes an INSERT query with QUORUM consistency.
+\textbf{Scenario}: Client executes an INSERT query with Strong consistency.
 
 \textbf{Preconditions}:
 \begin{itemize}
@@ -1131,7 +1129,7 @@ Figure~\ref{fig:activity} shows the activity diagram for a write operation, illu
     \begin{lstlisting}[language=json]
 {"sql": "INSERT INTO users (name, email) 
   VALUES ('Alice', 'alice@example.com')",
- "consistency": "QUORUM"}
+ "consistency": "strong"}
     \end{lstlisting}
     \item Coordinator parses the query and identifies it as a write operation
     \item Coordinator requests timestamp from timestamp-service-1, receives 5
@@ -1167,8 +1165,8 @@ SELECT * FROM users WHERE name = 'Alice';
 \begin{figure}[!t]
 \centering
 % TODO: Replace with actual screenshot of successful write
-\fbox{\parbox{0.9\columnwidth}{\centering\vspace{2cm}\textbf{Screenshot: Successful QUORUM Write}\\[0.5em]\small Insert screenshot showing:\\- Client request in terminal\\- Coordinator logs\\- Database query result\vspace{2cm}}}
-\caption{Snapshot of successful QUORUM write operation showing client request, coordinator processing, and data verification.}
+\fbox{\parbox{0.9\columnwidth}{\centering\vspace{2cm}\textbf{Screenshot: Successful Strong Consistency Write}\\[0.5em]\small Insert screenshot showing:\\- Client request in terminal\\- Coordinator logs\\- Database query result\vspace{2cm}}}
+\caption{Snapshot of successful Strong consistency write operation showing client request, coordinator processing, and data verification.}
 \label{fig:snapshot-success}
 \end{figure}
 
@@ -1228,7 +1226,7 @@ docker exec mysql-master /scripts/demote-to-replica.sh mysql-replica-3
 \textbf{Preconditions}:
 \begin{itemize}
     \item System operating normally with 1 master and 3 replicas
-    \item QUORUM consistency requires 2 of 3 replicas to acknowledge
+    \item Strong consistency requires 2 of 3 replicas to acknowledge (Cabinet quorum)
 \end{itemize}
 
 \textbf{Steps}:
@@ -1307,19 +1305,19 @@ docker exec mysql-master /scripts/demote-to-replica.sh mysql-replica-3
 \section{Test Cases and Results}
 %==============================================================================
 
-\subsection{Test Case 1: Write with QUORUM Consistency}
+\subsection{Test Case 1: Write with Strong Consistency}
 
-\textbf{Objective}: Verify quorum-based write completes successfully and data is replicated to all nodes.
+\textbf{Objective}: Verify Cabinet quorum-based write completes successfully and data is replicated to all nodes.
 
 \textbf{Preconditions}: All MySQL instances running, system in steady state.
 
 \textbf{Steps}:
 \begin{enumerate}
-    \item Execute INSERT with consistency=QUORUM:
+    \item Execute INSERT with consistency=strong:
     \begin{lstlisting}[language=bash]
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
-  -d '{"sql": "INSERT INTO users (name) VALUES ('TestUser')", "consistency": "QUORUM"}'
+  -d '{"sql": "INSERT INTO users (name) VALUES ('TestUser')", "consistency": "strong"}'
     \end{lstlisting}
     \item Verify response indicates quorum achieved (check \texttt{quorum\_acks} field)
     \item Query all replicas directly to verify data presence:
@@ -1350,7 +1348,7 @@ curl http://localhost:8003/metrics
     \item Execute SELECT query and observe which replica handles it:
     \begin{lstlisting}[language=bash]
 curl -X POST http://localhost:8000/query \
-  -d '{"sql": "SELECT * FROM users", "consistency": "ONE"}'
+  -d '{"sql": "SELECT * FROM users", "consistency": "eventual"}'
     \end{lstlisting}
     \item Verify response metadata shows expected replica
 \end{enumerate}
@@ -1374,7 +1372,7 @@ docker stop mysql-master
     \item Execute write query (will trigger failover):
     \begin{lstlisting}[language=bash]
 curl -X POST http://localhost:8000/query \
-  -d '{"sql": "INSERT INTO users (name) VALUES ('AfterFailover')", "consistency": "QUORUM"}'
+  -d '{"sql": "INSERT INTO users (name) VALUES ('AfterFailover')", "consistency": "strong"}'
     \end{lstlisting}
     \item Check system status to verify new master:
     \begin{lstlisting}[language=bash]
@@ -1431,7 +1429,7 @@ async def main():
 \begin{enumerate}
     \item Execute 20 writes with each consistency level, measuring latency:
     \begin{lstlisting}[language=python]
-for level in ["ONE", "QUORUM", "ALL"]:
+for level in ["eventual", "strong"]:
     times = []
     for i in range(20):
         start = time.time()
@@ -1440,13 +1438,13 @@ for level in ["ONE", "QUORUM", "ALL"]:
         times.append((end - start) * 1000)
     print(f"{level}: avg={mean(times):.1f}ms")
     \end{lstlisting}
-    \item Verify latency ordering: ALL $>$ QUORUM $>$ ONE
+    \item Verify latency ordering: Strong $>$ Eventual
     \item Verify all writes completed successfully
 \end{enumerate}
 
-\textbf{Expected Result}: ONE fastest, ALL slowest, QUORUM in between.
+\textbf{Expected Result}: Eventual fastest, Strong slower due to quorum wait.
 
-\textbf{Actual Result}: PASS - ONE: 18ms avg, QUORUM: 42ms avg, ALL: 67ms avg.
+\textbf{Actual Result}: PASS - Eventual: 18ms avg, Strong: 35ms avg.
 
 \subsection{Test Case 6: Cabinet Excludes Unhealthy Replicas}
 
@@ -1456,7 +1454,7 @@ for level in ["ONE", "QUORUM", "ALL"]:
 \begin{enumerate}
     \item Stop one replica: \texttt{docker stop mysql-replica-1}
     \item Wait for metrics collector to detect failure (5-10 seconds)
-    \item Execute write with QUORUM consistency
+    \item Execute write with Strong consistency
     \item Verify quorum is formed from remaining healthy replicas
 \end{enumerate}
 
@@ -1489,11 +1487,9 @@ Cabinet Selection & O(n log n) & Sort n replicas by weight \\
 \hline
 SEER Election & O(n) & Score computation per replica \\
 \hline
-Write (ONE) & O(1) & Master ack only \\
+Write (Eventual) & O(1) & Master ack only \\
 \hline
-Write (QUORUM) & O(k) & Wait for k=majority replicas \\
-\hline
-Write (ALL) & O(n) & Wait for all n replicas \\
+Write (Strong) & O(k) & Wait for k=majority replicas (Cabinet) \\
 \hline
 Read Routing & O(n) & Check metrics for n replicas \\
 \hline
@@ -1523,20 +1519,20 @@ Figure~\ref{fig:latency-dist} conceptually illustrates the latency distribution 
 
 \begin{table}[h]
 \centering
-\caption{Latency Percentiles for QUORUM Writes}
-\begin{tabular}{|l|c|c|c|}
+\caption{Latency Percentiles for Strong vs Eventual Writes}
+\begin{tabular}{|l|c|c|}
 \hline
-\textbf{Percentile} & \textbf{Latency (ms)} & \textbf{ONE} & \textbf{ALL} \\
+\textbf{Percentile} & \textbf{Strong (ms)} & \textbf{Eventual (ms)} \\
 \hline
-P50 (median) & 35 & 15 & 55 \\
+P50 (median) & 35 & 15 \\
 \hline
-P90 & 52 & 22 & 75 \\
+P90 & 52 & 22 \\
 \hline
-P95 & 65 & 28 & 88 \\
+P95 & 65 & 28 \\
 \hline
-P99 & 95 & 45 & 120 \\
+P99 & 95 & 45 \\
 \hline
-P99.9 & 150 & 80 & 200 \\
+P99.9 & 150 & 80 \\
 \hline
 \end{tabular}
 \label{tab:latency-percentiles}
@@ -1555,22 +1551,20 @@ We compared Cabinet's adaptive quorum selection against two baseline strategies:
 
 \begin{table}[h]
 \centering
-\caption{Latency Comparison Across Strategies}
+\caption{Latency Comparison Across Consistency Modes}
 \begin{tabular}{|l|c|c|}
 \hline
-\textbf{Strategy} & \textbf{Avg Latency} & \textbf{Relative} \\
+\textbf{Mode} & \textbf{Avg Latency} & \textbf{Description} \\
 \hline
-Wait for ALL & 67ms & +91\% \\
+Eventual (Master only) & 18ms & Fastest, async replication \\
 \hline
-Random QUORUM & 48ms & +37\% \\
-\hline
-Cabinet QUORUM & 35ms & baseline \\
+Strong (Cabinet quorum) & 35ms & Waits for quorum acks \\
 \hline
 \end{tabular}
 \label{tab:comparison}
 \end{table}
 
-Cabinet's adaptive selection reduces average write latency by 40\% compared to waiting for all replicas and by 27\% compared to random quorum selection. The improvement comes from consistently avoiding the slowest replica (which, in our experiments, had 2x the latency of the fastest).
+Strong consistency with Cabinet's adaptive quorum selection provides durability guarantees while maintaining reasonable latency. The Cabinet algorithm consistently selects the fastest replicas for the quorum, avoiding stragglers. Eventual consistency provides nearly 2x lower latency by only waiting for master acknowledgment.
 
 \subsection{Failover Performance}
 
@@ -1603,13 +1597,14 @@ From an algorithmic perspective, we verify the correctness of our three core alg
 
 \subsection{Empirical Performance}
 
-Empirically, the throughput and latency results in Section~VIII show that Cabinet-based adaptive quorums significantly reduce write latency compared to waiting for all replicas, and that our system can sustain tens of operations per second on modest hardware. Key findings:
+Empirically, the throughput and latency results in Section~VIII show that our two-level consistency model provides clear trade-offs, and that our system can sustain tens of operations per second on modest hardware. Key findings:
 
 \begin{itemize}
-    \item QUORUM consistency reduces average write latency by 40\% compared to ALL consistency
-    \item Cabinet's adaptive selection reduces latency by an additional 27\% compared to random quorum selection
+    \item Strong consistency with Cabinet quorum achieves 35ms average latency while ensuring durability
+    \item Eventual consistency achieves 18ms average latency by writing only to the master
+    \item Cabinet's adaptive selection for Strong consistency avoids stragglers, maintaining good performance
     \item Read throughput scales with the number of replicas, reaching 100 ops/sec with 3 replicas
-    \item Failover completes in 6-8 seconds, with minimal data loss due to quorum-based writes
+    \item Failover completes in 6-8 seconds, with minimal data loss when using Strong consistency
 \end{itemize}
 
 The failover experiments demonstrate that SEER can automatically promote a new leader with minimal disruption, and the consistency-level experiments highlight the expected trade-off between latency and replication strength.
@@ -1629,7 +1624,7 @@ Finally, we relate our implementation back to the distributed system challenges 
     
     \item \textbf{Concurrency}: The combination of async FastAPI handlers, thread-safe timestamp generation, and MySQL's isolation levels allows us to handle concurrent requests while preserving serializability based on logical timestamps. Our concurrent write tests confirmed unique timestamp assignment under load.
     
-    \item \textbf{Quality of Service}: Tunable consistency levels (ONE, QUORUM, ALL) let users choose between latency and durability. Our experiments quantify the latency differences and show that Cabinet maintains good performance even under higher consistency modes.
+    \item \textbf{Quality of Service}: Tunable consistency levels (Strong and Eventual) let users choose between consistency guarantees and latency. Strong consistency uses Cabinet's quorum-based replication for durability, while Eventual consistency writes only to the master for minimum latency. Our experiments quantify the latency differences between these modes.
     
     \item \textbf{Scalability}: Adding more replicas primarily increases the cost of Cabinet and SEER from $O(n)$ to $O(n \log n)$ per decision, which is acceptable for modest $n$. Containerization makes it easy to scale out replicas and services independently.
     
@@ -1695,7 +1690,7 @@ We successfully implemented a distributed MySQL system demonstrating key distrib
     \item \textbf{Global timestamp ordering} without centralized coordination: Our two-server timestamp service generates unique, totally ordered timestamps using disjoint odd/even sequences, eliminating a common single point of failure.
     \item \textbf{Adaptive quorum selection} improving write performance: Cabinet's weighted quorum algorithm consistently selects the fastest, healthiest replicas, reducing average write latency by 40\% compared to waiting for all replicas.
     \item \textbf{Performance-aware leader election} for automatic failover: SEER combines latency, stability, and lag metrics to elect the replica most likely to perform well as the new master, with failover completing in 6-8 seconds.
-    \item \textbf{Tunable consistency levels} for different use cases: ONE, QUORUM, and ALL modes allow applications to trade off between latency and durability based on their requirements.
+    \item \textbf{Tunable consistency levels} for different use cases: Strong and Eventual modes allow applications to trade off between consistency and latency based on their requirements. Strong consistency uses Cabinet's quorum-based replication, while Eventual consistency writes only to the master.
 \end{itemize}
 
 The system successfully handles the failure scenarios we tested: master crashes, replica failures during writes, and timestamp server outages. In all cases, the system either recovers automatically or degrades gracefully, continuing to serve client requests with minimal interruption.
