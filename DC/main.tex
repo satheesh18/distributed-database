@@ -410,6 +410,64 @@ Figure~\ref{fig:architecture} shows the system architecture. The system consists
   \label{fig:architecture}
 \end{figure*}
 
+\subsection{Use Case Diagram}
+
+Figure~\ref{fig:usecase} shows the use case diagram illustrating the main functionalities of our distributed database system from the perspective of different actors.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}[scale=0.7, transform shape]
+    % System boundary
+    \draw[thick, rounded corners] (-0.5,-5.5) rectangle (7,3.5);
+    \node[font=\footnotesize\bfseries] at (3.25,3.2) {Distributed Database System};
+    
+    % Actor: Client Application
+    \node[font=\footnotesize] at (-2,1) {Client};
+    \node[font=\footnotesize] at (-2,0.5) {Application};
+    \draw (-2,2) circle (0.3);
+    \draw (-2,1.7) -- (-2,1.2);
+    \draw (-2.3,1.5) -- (-1.7,1.5);
+    \draw (-2,1.2) -- (-2.3,0.7);
+    \draw (-2,1.2) -- (-1.7,0.7);
+    
+    % Actor: System Admin
+    \node[font=\footnotesize] at (-2,-3) {System};
+    \node[font=\footnotesize] at (-2,-3.5) {Admin};
+    \draw (-2,-2) circle (0.3);
+    \draw (-2,-2.3) -- (-2,-2.8);
+    \draw (-2.3,-2.5) -- (-1.7,-2.5);
+    \draw (-2,-2.8) -- (-2.3,-3.3);
+    \draw (-2,-2.8) -- (-1.7,-3.3);
+    
+    % Use cases
+    \node[ellipse, draw, fill=blue!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc1) at (3,2.5) {Execute SQL Query};
+    \node[ellipse, draw, fill=blue!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc2) at (3,1.3) {Read Data (SELECT)};
+    \node[ellipse, draw, fill=blue!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc3) at (3,0.1) {Write Data (INSERT)};
+    \node[ellipse, draw, fill=green!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc4) at (3,-1.1) {Set Consistency Level};
+    \node[ellipse, draw, fill=orange!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc5) at (3,-2.3) {View System Status};
+    \node[ellipse, draw, fill=red!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc6) at (3,-3.5) {Trigger Failover};
+    \node[ellipse, draw, fill=yellow!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc7) at (3,-4.7) {Monitor Metrics};
+    
+    % Connections from Client
+    \draw[-] (-1.5,1.5) -- (uc1);
+    \draw[-] (-1.5,1.3) -- (uc2);
+    \draw[-] (-1.5,1.1) -- (uc3);
+    \draw[-] (-1.5,0.9) -- (uc4);
+    \draw[-] (-1.5,0.7) -- (uc5);
+    
+    % Connections from Admin
+    \draw[-] (-1.5,-2.3) -- (uc5);
+    \draw[-] (-1.5,-2.5) -- (uc6);
+    \draw[-] (-1.5,-2.7) -- (uc7);
+    
+    % Include/Extend relationships
+    \draw[dashed, ->] (uc2) -- node[right, font=\tiny] {<<extends>>} (uc1);
+    \draw[dashed, ->] (uc3) -- node[right, font=\tiny] {<<extends>>} (uc1);
+\end{tikzpicture}
+\caption{Use Case Diagram showing system functionality from user and admin perspectives.}
+\label{fig:usecase}
+\end{figure}
+
 \subsection{Component Descriptions}
 
 \subsubsection{Coordinator (FastAPI)}
@@ -529,6 +587,59 @@ Figure~\ref{fig:component} shows the component interactions in our system.
 \end{tikzpicture}
 \caption{Component Diagram showing service dependencies.}
 \label{fig:component}
+\end{figure}
+
+\subsection{Deployment Diagram}
+
+Figure~\ref{fig:deployment} shows the deployment diagram illustrating how our system components are deployed across Docker containers on the host machine.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}[scale=0.65, transform shape]
+    % Host Machine
+    \node[rectangle, draw, thick, fill=gray!10, minimum width=9cm, minimum height=7cm] (host) at (4,-2.5) {};
+    \node[font=\footnotesize\bfseries] at (4,1.2) {<<device>>};
+    \node[font=\footnotesize] at (4,0.8) {Host Machine (Docker Host)};
+    
+    % Docker Network
+    \node[rectangle, draw, dashed, fill=blue!5, minimum width=8.5cm, minimum height=6cm] (network) at (4,-2.8) {};
+    \node[font=\tiny] at (4,-0.1) {<<network>> db-network};
+    
+    % Coordinator Container
+    \node[rectangle, draw, fill=green!20, minimum width=2cm, minimum height=1cm, font=\tiny] (coord) at (1,-1) {<<container>>\\coordinator:8000};
+    
+    % Timestamp Containers
+    \node[rectangle, draw, fill=cyan!20, minimum width=1.5cm, minimum height=0.8cm, font=\tiny] (ts1) at (4,-1) {<<container>>\\ts-1:8001};
+    \node[rectangle, draw, fill=cyan!20, minimum width=1.5cm, minimum height=0.8cm, font=\tiny] (ts2) at (6.5,-1) {<<container>>\\ts-2:8002};
+    
+    % Service Containers
+    \node[rectangle, draw, fill=yellow!20, minimum width=1.3cm, minimum height=0.8cm, font=\tiny] (metrics) at (0.5,-2.5) {<<container>>\\metrics:8003};
+    \node[rectangle, draw, fill=orange!20, minimum width=1.3cm, minimum height=0.8cm, font=\tiny] (cabinet) at (2.5,-2.5) {<<container>>\\cabinet:8004};
+    \node[rectangle, draw, fill=red!20, minimum width=1.3cm, minimum height=0.8cm, font=\tiny] (seer) at (4.5,-2.5) {<<container>>\\seer:8005};
+    
+    % MySQL Containers
+    \node[rectangle, draw, fill=purple!20, minimum width=1.5cm, minimum height=0.8cm, font=\tiny] (master) at (1,-4.2) {<<container>>\\mysql-master\\:3306};
+    \node[rectangle, draw, fill=purple!15, minimum width=1.3cm, minimum height=0.7cm, font=\tiny] (r1) at (3.2,-4.2) {<<container>>\\replica-1};
+    \node[rectangle, draw, fill=purple!15, minimum width=1.3cm, minimum height=0.7cm, font=\tiny] (r2) at (5.2,-4.2) {<<container>>\\replica-2};
+    \node[rectangle, draw, fill=purple!15, minimum width=1.3cm, minimum height=0.7cm, font=\tiny] (r3) at (7.2,-4.2) {<<container>>\\replica-3};
+    
+    % Volumes
+    \node[rectangle, draw, fill=gray!30, minimum width=1.2cm, minimum height=0.5cm, font=\tiny] (vol) at (1,-5.3) {<<volume>>\\mysql-data};
+    
+    % External client
+    \node[rectangle, draw, fill=white, minimum width=1.5cm, minimum height=0.8cm, font=\tiny] (client) at (1,2.2) {<<external>>\\Client App};
+    
+    % Connections
+    \draw[->] (client) -- (coord);
+    \draw[->] (coord) -- (ts1);
+    \draw[->] (coord) -- (ts2);
+    \draw[->] (coord) -- (master);
+    \draw[->] (cabinet) -- (metrics);
+    \draw[->] (seer) -- (metrics);
+    \draw[->] (master) -- (vol);
+\end{tikzpicture}
+\caption{Deployment Diagram showing Docker container topology and network configuration.}
+\label{fig:deployment}
 \end{figure}
 
 %==============================================================================
@@ -899,6 +1010,103 @@ Figure~\ref{fig:class} shows the key modules and their relationships.
 \end{tikzpicture}
 \caption{Class/Module Diagram showing service relationships.}
 \label{fig:class}
+\end{figure}
+
+\subsection{Object Diagram: Runtime Instance}
+
+Figure~\ref{fig:object} shows an object diagram representing a snapshot of the system at runtime during a typical write operation, illustrating actual object instances and their current state.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}[scale=0.7, transform shape]
+    % Coordinator instance
+    \node[rectangle, draw, fill=blue!15, minimum width=3.5cm, minimum height=2cm] (coord) at (0,0) {};
+    \node[font=\footnotesize, text decoration=underline] at (0,0.7) {\underline{coord1:Coordinator}};
+    \draw[thick] (-1.75,-0.1) -- (1.75,-0.1);
+    \node[font=\tiny, align=left] at (0,-0.4) {current\_master = ``mysql-master''};
+    \node[font=\tiny, align=left] at (0,-0.8) {consistency = ``QUORUM''};
+    
+    % Timestamp instance
+    \node[rectangle, draw, fill=green!15, minimum width=3cm, minimum height=1.5cm] (ts) at (-3.5,-2.5) {};
+    \node[font=\footnotesize] at (-3.5,-1.9) {\underline{ts1:TimestampService}};
+    \draw[thick] (-5,-2.3) -- (-2,-2.3);
+    \node[font=\tiny] at (-3.5,-2.7) {counter = 127};
+    
+    % Cabinet instance  
+    \node[rectangle, draw, fill=yellow!15, minimum width=3cm, minimum height=1.5cm] (cab) at (0,-2.5) {};
+    \node[font=\footnotesize] at (0,-1.9) {\underline{cab1:CabinetService}};
+    \draw[thick] (-1.5,-2.3) -- (1.5,-2.3);
+    \node[font=\tiny] at (0,-2.7) {quorum\_size = 2};
+    
+    % Metrics instance
+    \node[rectangle, draw, fill=purple!15, minimum width=3cm, minimum height=1.8cm] (met) at (3.5,-2.5) {};
+    \node[font=\footnotesize] at (3.5,-1.8) {\underline{m1:MetricsCollector}};
+    \draw[thick] (2,-2.2) -- (5,-2.2);
+    \node[font=\tiny, align=left] at (3.5,-2.6) {poll\_interval = 5s};
+    \node[font=\tiny, align=left] at (3.5,-3) {instances = 4};
+    
+    % Links
+    \draw[->] (coord) -- node[left, font=\tiny] {requests} (ts);
+    \draw[->] (coord) -- node[left, font=\tiny] {selects} (cab);
+    \draw[->] (cab) -- node[above, font=\tiny] {queries} (met);
+\end{tikzpicture}
+\caption{Object Diagram showing runtime instances during a write operation.}
+\label{fig:object}
+\end{figure}
+
+\subsection{Activity Diagram: Write Operation Flow}
+
+Figure~\ref{fig:activity} shows the activity diagram for a write operation, illustrating the flow of control through the system.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}[scale=0.65, transform shape, node distance=0.8cm]
+    % Start
+    \node[circle, fill=black, minimum size=0.4cm] (start) at (0,0) {};
+    
+    % Activities
+    \node[rectangle, rounded corners, draw, fill=blue!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of start] (a1) {Receive SQL Query};
+    \node[rectangle, rounded corners, draw, fill=blue!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of a1] (a2) {Parse Query Type};
+    
+    % Decision
+    \node[diamond, draw, fill=yellow!20, minimum size=0.8cm, font=\tiny, below=of a2] (d1) {};
+    \node[font=\tiny] at (0,-3.7) {Write?};
+    
+    % Write path
+    \node[rectangle, rounded corners, draw, fill=green!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below left=0.8cm and 0.5cm of d1] (a3) {Get Timestamp};
+    \node[rectangle, rounded corners, draw, fill=green!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of a3] (a4) {Execute on Master};
+    \node[rectangle, rounded corners, draw, fill=green!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of a4] (a5) {Select Quorum (Cabinet)};
+    \node[rectangle, rounded corners, draw, fill=green!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of a5] (a6) {Replicate to Quorum};
+    \node[rectangle, rounded corners, draw, fill=green!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of a6] (a7) {Wait for Acks};
+    
+    % Read path
+    \node[rectangle, rounded corners, draw, fill=orange!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below right=0.8cm and 0.5cm of d1] (r1) {Select Best Replica};
+    \node[rectangle, rounded corners, draw, fill=orange!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of r1] (r2) {Execute Query};
+    
+    % Merge
+    \node[rectangle, rounded corners, draw, fill=blue!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny] (a8) at (0,-10) {Return Response};
+    
+    % End
+    \node[circle, draw, fill=black, minimum size=0.3cm, below=of a8] (end) {};
+    \node[circle, draw, minimum size=0.5cm, below=of a8] (endouter) {};
+    
+    % Arrows
+    \draw[->] (start) -- (a1);
+    \draw[->] (a1) -- (a2);
+    \draw[->] (a2) -- (d1);
+    \draw[->] (d1) -| node[above, font=\tiny] {Yes} (a3);
+    \draw[->] (d1) -| node[above, font=\tiny] {No} (r1);
+    \draw[->] (a3) -- (a4);
+    \draw[->] (a4) -- (a5);
+    \draw[->] (a5) -- (a6);
+    \draw[->] (a6) -- (a7);
+    \draw[->] (a7) |- (a8);
+    \draw[->] (r1) -- (r2);
+    \draw[->] (r2) |- (a8);
+    \draw[->] (a8) -- (endouter);
+\end{tikzpicture}
+\caption{Activity Diagram showing the flow of a query through the system.}
+\label{fig:activity}
 \end{figure}
 
 %==============================================================================
