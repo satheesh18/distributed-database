@@ -57,7 +57,7 @@ San Jos\'e State University\\
 \begin{abstract}
 This report presents the design, implementation, and evaluation of a distributed MySQL database system that addresses key challenges in distributed systems: consistency, fault tolerance, and performance optimization. Modern distributed databases must balance competing requirements: strong consistency for correctness, high availability for user experience, and low latency for performance. Our system implements three core algorithms drawn from recent research: (1) Timestamp as a Service for globally ordered writes without centralized coordination, enabling total ordering of operations while eliminating single points of failure; (2) Cabinet algorithm for adaptive quorum-based replication that dynamically selects the fastest and healthiest replicas, reducing write latency by up to 40\% compared to static configurations; and (3) SEER algorithm for performance-aware leader election during master failures, selecting new leaders based on latency, stability, and replication lag rather than arbitrary criteria.
 
-The system is built using Docker containers with a FastAPI-based coordinator, four MySQL 8.0 instances (one master and three replicas), and dedicated microservices for metrics collection, quorum selection, and leader election. We provide tunable consistency levels (Strong and Eventual) that allow applications to trade off between consistency and latency based on their specific requirements. Strong consistency uses Cabinet's quorum-based replication, while Eventual consistency writes only to the master for minimum latency. Our evaluation demonstrates that the adaptive approach with Strong consistency achieves 35ms average write latency while maintaining consistency guarantees through quorum intersection, compared to 18ms for Eventual consistency. The system successfully handles master failures with automatic promotion of the best-performing replica, completing failover in 6-8 seconds with minimal data loss. Our implementation serves as both an educational tool for understanding distributed systems concepts and a foundation for production-grade distributed database research.
+The system is built using Docker containers with a FastAPI-based coordinator, four MySQL 8.0 instances (one master: mysql-instance-1, and three replicas: instance-2, instance-3, instance-4), and dedicated microservices for metrics collection, quorum selection, and leader election. We use MySQL's native GTID-based binlog replication for data propagation. We provide tunable consistency levels (Strong and Eventual) that allow applications to trade off between consistency and latency based on their specific requirements. Strong consistency uses Cabinet's quorum-based replication, while Eventual consistency writes only to the master for minimum latency. Our evaluation demonstrates that the adaptive approach with Strong consistency achieves 35ms average write latency while maintaining consistency guarantees through quorum intersection, compared to 18ms for Eventual consistency. The system successfully handles master failures with automatic promotion of the best-performing replica, completing failover in 6-8 seconds with minimal data loss. Our implementation serves as both an educational tool for understanding distributed systems concepts and a foundation for production-grade distributed database research.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -227,13 +227,13 @@ While our current prototype runs on a single machine with Docker, the architectu
 The system provides multiple forms of transparency as defined in the distributed systems literature:
 
 \begin{itemize}
-    \item \textbf{Location transparency}: Clients send queries to a single coordinator endpoint (\texttt{http://localhost:8000/query}) without knowing which MySQL instance handles the request. The coordinator abstracts away the physical topology of the cluster.
+    \item \textbf{Location transparency}: Clients send queries to a single coordinator endpoint (\texttt{http://localhost:9000/query}) without knowing which MySQL instance handles the request. The coordinator abstracts away the physical topology of the cluster.
     \item \textbf{Replication transparency}: Data is automatically replicated to all replicas in the background. Clients do not need to explicitly request replication or specify which replicas should receive their data.
     \item \textbf{Failure transparency}: When a replica or the master fails, the system automatically detects the failure and adjusts its behavior. Clients may notice a brief latency spike during failover but do not need to change their code or retry logic.
     \item \textbf{Migration transparency}: If we were to move a MySQL instance to a different host or container, the coordinator would seamlessly route traffic to the new location after updating its configuration.
 \end{itemize}
 
-This transparency is achieved through the coordinator's role as a single point of contact for all client operations. While this introduces a potential single point of failure (discussed in Section~X), it greatly simplifies the client experience and allows us to evolve the backend infrastructure without impacting applications.
+This transparency is achieved through the coordinator's role as a single point of contact for all client operations. While this introduces a potential single point of failure (discussed in the Limitations section), it greatly simplifies the client experience and allows us to evolve the backend infrastructure without impacting applications.
 
 %==============================================================================
 \section{Literature Review}
@@ -273,7 +273,7 @@ Leader election is critical for maintaining availability in replicated systems. 
 
 Our methodology follows the plan outlined in our original project proposal. We first selected three algorithms from recent research-Timestamp as a Service, Cabinet, and SEER-and mapped each of them to a dedicated microservice. We then designed a coordinating layer that exposes a single SQL endpoint and orchestrates these services.
 
-When a client issues a write, it is first received by the coordinator, which contacts our distributed timestamp service to obtain a globally ordered logical timestamp. The coordinator forwards the write and timestamp to the current MySQL master, which executes the statement and records the timestamp in a metadata table. The coordinator then invokes the Cabinet service, which selects a high-quality quorum of replicas based on current performance metrics. The write is replicated to all replicas, but the coordinator only waits for acknowledgments from the selected quorum before confirming success to the client.
+When a client issues a write, it is first received by the coordinator, which contacts our distributed timestamp service to obtain a globally ordered logical timestamp. The coordinator forwards the write and timestamp to the current MySQL master, which executes the statement and records the timestamp in a metadata table. MySQL's native GTID-based binlog replication then propagates the write to all replicas asynchronously. The coordinator invokes the Cabinet service to select a high-quality quorum of replicas based on current performance metrics, then polls these replicas until they have caught up to the write's timestamp before confirming success to the client.
 
 For reads, the coordinator inspects replica metrics to choose an appropriate target. For strongly consistent reads, it only uses replicas whose last-applied timestamp is at least as recent as the requested version. For more latency-sensitive reads, it can deliberately choose slightly stale replicas. When the master fails, the coordinator calls the SEER service, which scores all healthy replicas using latency, lag, uptime, and crash history and selects a new leader. The coordinator then updates its routing state and resumes handling client requests.
 
@@ -293,8 +293,8 @@ We expose a REST-style API:
 The \texttt{/query} endpoint accepts a JSON payload:
 \begin{lstlisting}[language=json,caption=Client API for Query Execution]
 {
-  "sql": "SELECT * FROM users WHERE id = 1",
-  "consistency": "strong | eventual"
+  "query": "SELECT * FROM users WHERE id = 1",
+  "consistency": "STRONG | EVENTUAL"
 }
 \end{lstlisting}
 
@@ -317,14 +317,14 @@ The coordinator's read path combines consistency semantics with performance-driv
 
 In pseudocode, the read routing logic is:
 \begin{lstlisting}[caption=Read Routing Based on Metrics]
-def route_read(sql, consistency):
+def route_read(query, consistency):
     metrics = get_metrics_from_collector()
     candidates = []
     for replica in metrics.replicas:
         if not replica.is_healthy:
             continue
         # Enforce freshness based on mode
-        if consistency == "strong":
+        if consistency == "STRONG":
             if replica.last_ts < metrics.master_last_ts:
                 continue
         candidates.append(replica)
@@ -333,7 +333,7 @@ def route_read(sql, consistency):
         candidates = [r for r in metrics.replicas if r.is_healthy]
     # Choose lowest-latency candidate
     target = min(candidates, key=lambda r: r.latency_ms)
-    return execute_sql_on(target, sql)
+    return execute_query_on(target, query)
 \end{lstlisting}
 
 This algorithm is $O(n)$ in the number of replicas and ensures that, under Strong consistency, reads observe at least the master's most recent committed timestamp whenever a suitable replica exists. Under Eventual consistency, we relax the timestamp filter and instead emphasize latency, which is consistent with the weaker guarantees.
@@ -364,27 +364,27 @@ Internally, the metrics collector stores one record per replica in an in-memory 
 \caption{Metrics Schema for Each Replica}
 \begin{tabular}{|l|l|l|}
 \hline
-	extbf{Field} & \textbf{Type} & \textbf{Description} \\
+\textbf{Field} & \textbf{Type} & \textbf{Description} \\
 \hline
-id & string & Logical replica identifier \\
+replica\_id & string & Logical replica identifier \\
 \hline
-latency	extunderscore ms & float & Last probe round-trip time \\
+latency\_ms & float & Last probe round-trip time \\
 \hline
-lag	extunderscore ts & int & Timestamps behind master \\
+replication\_lag & int & Timestamps behind master \\
 \hline
-uptime	extunderscore s & int & Seconds since last failure \\
+uptime\_seconds & float & Seconds since last failure \\
 \hline
-crash	extunderscore count & int & Total observed crashes \\
+crash\_count & int & Total observed crashes \\
 \hline
-is	extunderscore healthy & bool & Health flag from last probe \\
+is\_healthy & bool & Health flag from last probe \\
 \hline
-last	extunderscore ts & int & Last applied logical timestamp \\
+last\_updated & string & ISO timestamp of last update \\
 \hline
 \end{tabular}
 \label{tab:metrics-schema}
 \end{table}
 
-Cabinet uses \texttt{latency\_ms} and \texttt{lag\_ts} to compute replica weights (Section~IV-B), while SEER uses all fields to compute its composite leader-election score (Section~IV-C). The coordinator relies on \texttt{is\_healthy} and \texttt{last\_ts} to decide which replicas are safe targets for reads.
+Cabinet uses \texttt{latency\_ms} and \texttt{replication\_lag} to compute replica weights, while SEER uses all fields to compute its composite leader-election score. The coordinator relies on \texttt{is\_healthy} and replication lag to decide which replicas are safe targets for reads.
 
 \subsection{Design Goals}
 
@@ -469,21 +469,21 @@ Figure~\ref{fig:usecase} shows the use case diagram illustrating the main functi
 \subsection{Component Descriptions}
 
 \subsubsection{Coordinator (FastAPI)}
-The central component that receives all client SQL queries and orchestrates the distributed system. It serves as the single entry point for the system, providing location transparency to clients. The coordinator is implemented as a FastAPI application running on port 8000 with the following responsibilities:
+The central component that receives all client SQL queries and orchestrates the distributed system. It serves as the single entry point for the system, providing location transparency to clients. The coordinator is implemented as a FastAPI application exposed on port 9000 (internally 8000) with the following responsibilities:
 \begin{itemize}
     \item \textbf{Query parsing}: Analyzes incoming SQL to determine whether it is a read (SELECT) or write (INSERT, UPDATE, DELETE) operation using a simple regex-based parser in \texttt{query\_parser.py}
     \item \textbf{Timestamp acquisition}: Contacts one of the two timestamp servers to obtain a globally ordered timestamp for write operations
     \item \textbf{Write execution}: Executes writes on the current master, then replicates to replicas based on the consistency level
-    \item \textbf{Quorum coordination}: Calls the Cabinet service to determine which replicas to include in the write quorum, then waits for the required number of acknowledgments
+    \item \textbf{Quorum coordination}: Calls the Cabinet service to determine which replicas to include in the write quorum, then polls those replicas until they catch up to the write's timestamp via binlog replication
     \item \textbf{Read routing}: Selects the best replica for read operations based on current metrics (latency, lag, health)
     \item \textbf{Failover handling}: Detects master failures, calls SEER for leader election, and promotes the winning replica to master
     \item \textbf{Status reporting}: Exposes \texttt{/status} and \texttt{/health} endpoints for monitoring and observability
 \end{itemize}
 
-The coordinator maintains connection pools to all MySQL instances and uses asyncio for concurrent request handling. A typical request flow involves 3-5 internal service calls (timestamp, master write, Cabinet selection, replica writes, quorum wait).
+The coordinator maintains connections to all MySQL instances and uses asyncio for concurrent request handling. A typical write request flow involves: (1) timestamp acquisition, (2) master write execution, (3) Cabinet quorum selection, and (4) polling replicas until quorum catches up via binlog replication.
 
 \subsubsection{Timestamp Services (2 instances)}
-Two independent services provide globally ordered timestamps without central coordination. Each service runs on its own port (8001 and 8002) and maintains a thread-safe counter:
+Two independent services provide globally ordered timestamps without central coordination. Each service is exposed on its own port (9001 and 9002 externally, 8000 internally) and maintains a thread-safe counter:
 \begin{itemize}
     \item \textbf{Server 1}: Returns odd numbers (1, 3, 5, 7, ...), starting from 1 and incrementing by 2
     \item \textbf{Server 2}: Returns even numbers (2, 4, 6, 8, ...), starting from 2 and incrementing by 2
@@ -496,7 +496,7 @@ This design eliminates coordination overhead while ensuring total ordering. The 
 \end{itemize}
 
 \subsubsection{Metrics Collector}
-A background service that continuously monitors the health and performance of all MySQL instances. Running on port 8003, it polls each instance every 5 seconds and maintains a real-time view of the cluster state. For each MySQL instance, it tracks:
+A background service that continuously monitors the health and performance of all MySQL instances. Exposed on port 9003, it polls each instance every 5 seconds and maintains a real-time view of the cluster state. For each MySQL instance, it tracks:
 \begin{itemize}
     \item \textbf{Connection latency (ms)}: Time to execute a simple health query (\texttt{SELECT 1})
     \item \textbf{Replication lag (timestamp units)}: Difference between master's latest timestamp and replica's last applied timestamp, read from the \texttt{\_metadata} table
@@ -505,10 +505,10 @@ A background service that continuously monitors the health and performance of al
     \item \textbf{Health status}: Boolean indicating current reachability
 \end{itemize}
 
-The metrics collector exposes \texttt{GET /metrics} to return all instance metrics as JSON, and \texttt{GET /metrics/\{id\}} to return metrics for a specific instance. Cabinet and SEER consume these metrics to make informed decisions.
+The metrics collector exposes \texttt{GET /metrics} to return all instance metrics as JSON, and \texttt{GET /metrics/\{replica\_id\}} to return metrics for a specific instance (e.g., \texttt{instance-2}). Cabinet and SEER consume these metrics to make informed decisions.
 
 \subsubsection{Cabinet Service}
-Implements adaptive quorum selection based on the Cabinet algorithm. Running on port 8004, it receives requests from the coordinator and returns the optimal set of replicas for a write quorum. The service:
+Implements adaptive quorum selection based on the Cabinet algorithm. Exposed on port 9004, it receives requests from the coordinator and returns the optimal set of replicas for a write quorum. The service:
 \begin{itemize}
     \item Fetches current metrics from the metrics collector via HTTP
     \item Computes a weight for each replica based on latency and lag: $w = 1 / (\text{latency} + \text{lag} + 1)$
@@ -520,7 +520,7 @@ Implements adaptive quorum selection based on the Cabinet algorithm. Running on 
 The \texttt{POST /select-quorum} endpoint accepts the list of available replicas and returns the selected quorum members with their weights.
 
 \subsubsection{SEER Service}
-Implements performance-aware leader election. Running on port 8005, it scores replicas on multiple factors and selects the best candidate to become the new master when failover is needed. The scoring algorithm considers:
+Implements performance-aware leader election. Exposed on port 9005, it scores replicas on multiple factors and selects the best candidate to become the new master when failover is needed. The scoring algorithm considers:
 \begin{itemize}
     \item \textbf{Latency (40\%)}: Lower latency indicates faster response times as master
     \item \textbf{Stability (40\%)}: Balances uptime against crash history to prefer reliable nodes
@@ -530,15 +530,22 @@ Implements performance-aware leader election. Running on port 8005, it scores re
 The \texttt{POST /elect-leader} endpoint accepts the list of candidate replicas (excluding the failed master) and returns the winner with its score breakdown.
 
 \subsubsection{MySQL Instances (4 containers)}
-Four MySQL 8.0 containers form the data layer: one master (\texttt{mysql-master}) and three replicas (\texttt{mysql-replica-1}, \texttt{mysql-replica-2}, \texttt{mysql-replica-3}). Each instance is configured identically with:
+Four MySQL 8.0 containers form the data layer: one master (\texttt{mysql-instance-1}) and three replicas (\texttt{mysql-instance-2}, \texttt{mysql-instance-3}, \texttt{mysql-instance-4}). Each instance is configured with:
 \begin{itemize}
-    \item The \texttt{testdb} database containing application tables (e.g., \texttt{users}, \texttt{orders})
-    \item A \texttt{\_metadata} table with a single row tracking the last applied timestamp: \texttt{CREATE TABLE \_metadata (key VARCHAR(50) PRIMARY KEY, value BIGINT)}
-    \item Custom configuration for replication (\texttt{master.cnf} or \texttt{replica.cnf})
-    \item Shell scripts for promotion (\texttt{promote-to-master.sh}) and demotion (\texttt{demote-to-replica.sh})
+    \item The \texttt{testdb} database containing application tables (e.g., \texttt{users}, \texttt{products})
+    \item A \texttt{\_metadata} table tracking the last applied timestamp:
+    \begin{lstlisting}[language=sql,basicstyle=\ttfamily\tiny]
+CREATE TABLE _metadata (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  last_applied_timestamp BIGINT DEFAULT 0,
+  last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+    \end{lstlisting}
+    \item Custom configuration for GTID-based replication (\texttt{master.cnf} or \texttt{replicaX.cnf})
+    \item A replication user (\texttt{replicator}) for binlog streaming between instances
 \end{itemize}
 
-The master accepts both reads and writes, while replicas are read-only. When a failover occurs, the coordinator runs the promotion script on the new master and demotion scripts on the remaining replicas to reconfigure replication.
+The master accepts both reads and writes, while replicas are read-only and receive updates via MySQL's native GTID-based binary log replication. When a failover occurs, the coordinator promotes the elected replica by stopping its replication, disabling read-only mode, and reconfiguring remaining replicas to replicate from the new master.
 
 % \subsection{Component Diagram}
 
@@ -710,7 +717,7 @@ def elect_leader(replicas):
 
 \subsection{Sequence Diagram: Write Operation}
 
-Figure~\ref{fig:seq-write} shows the sequence of interactions during a write operation.
+Figure~\ref{fig:seq-write} shows the sequence of interactions during a write operation. The coordinator executes the write on the master, then waits for MySQL's GTID-based binlog replication to propagate the changes to the Cabinet-selected quorum replicas.
 
 \begin{figure}[!t]
 \centering
@@ -723,26 +730,26 @@ Figure~\ref{fig:seq-write} shows the sequence of interactions during a write ope
     \node[actor, label=above:{\footnotesize Master}] (master) at (10,0) {};
     
     % Lifelines
-    \draw[lifeline] (client) -- (0,-7);
-    \draw[lifeline] (coord) -- (2.5,-7);
-    \draw[lifeline] (ts) -- (5,-7);
-    \draw[lifeline] (cab) -- (7.5,-7);
-    \draw[lifeline] (master) -- (10,-7);
+    \draw[lifeline] (client) -- (0,-8);
+    \draw[lifeline] (coord) -- (2.5,-8);
+    \draw[lifeline] (ts) -- (5,-8);
+    \draw[lifeline] (cab) -- (7.5,-8);
+    \draw[lifeline] (master) -- (10,-8);
     
     % Messages
-    \draw[message] (0,-1) -- node[above, font=\tiny] {INSERT} (2.5,-1);
+    \draw[message] (0,-1) -- node[above, font=\tiny] {POST /query} (2.5,-1);
     \draw[message] (2.5,-1.5) -- node[above, font=\tiny] {getTimestamp()} (5,-1.5);
     \draw[message] (5,-2) -- node[above, font=\tiny] {ts=5} (2.5,-2);
     \draw[message] (2.5,-2.5) -- node[above, font=\tiny] {selectQuorum()} (7.5,-2.5);
-    \draw[message] (7.5,-3) -- node[above, font=\tiny] {[r2,r3]} (2.5,-3);
+    \draw[message] (7.5,-3) -- node[above, font=\tiny] {[inst-3,inst-4]} (2.5,-3);
     \draw[message] (2.5,-3.5) -- node[above, font=\tiny] {execute(sql,ts)} (10,-3.5);
-    \draw[message] (10,-4) -- node[above, font=\tiny] {OK} (2.5,-4);
-    \draw[message] (2.5,-4.5) -- node[above, font=\tiny] {replicate()} (10,-5);
-    \node[font=\tiny] at (6.25,-4.75) {to replicas};
-    \draw[message] (10,-5.5) -- node[above, font=\tiny] {quorum ACK} (2.5,-5.5);
-    \draw[message] (2.5,-6) -- node[above, font=\tiny] {Success(ts=5)} (0,-6);
+    \draw[message] (10,-4) -- node[above, font=\tiny] {OK + binlog} (2.5,-4);
+    \node[font=\tiny, align=center] at (6.25,-4.75) {binlog replication\\propagates to replicas};
+    \draw[message] (2.5,-5.5) -- node[above, font=\tiny] {poll replica ts} (10,-5.5);
+    \draw[message] (10,-6) -- node[above, font=\tiny] {quorum caught up} (2.5,-6);
+    \draw[message] (2.5,-7) -- node[above, font=\tiny] {Success(ts=5)} (0,-7);
 \end{tikzpicture}
-\caption{Sequence Diagram for Write Operation with Quorum.}
+\caption{Sequence Diagram for Write Operation with Quorum. The coordinator writes to master, then polls Cabinet-selected replicas until they catch up via binlog replication.}
 \label{fig:seq-write}
 \end{figure}
 
@@ -756,9 +763,9 @@ Figure~\ref{fig:seq-failover} shows the failover sequence when the master fails.
     % Actors
     \node[actor, label=above:{\footnotesize Client}] (client) at (0,0) {};
     \node[actor, label=above:{\footnotesize Coordinator}] (coord) at (2.5,0) {};
-    \node[actor, label=above:{\footnotesize Master}] (master) at (5,0) {};
+    \node[actor, label=above:{\footnotesize Instance-1}] (master) at (5,0) {};
     \node[actor, label=above:{\footnotesize SEER}] (seer) at (7.5,0) {};
-    \node[actor, label=above:{\footnotesize Replica-3}] (rep) at (10,0) {};
+    \node[actor, label=above:{\footnotesize Instance-4}] (rep) at (10,0) {};
     
     % Lifelines
     \draw[lifeline] (client) -- (0,-7);
@@ -768,13 +775,13 @@ Figure~\ref{fig:seq-failover} shows the failover sequence when the master fails.
     \draw[lifeline] (rep) -- (10,-7);
     
     % Messages
-    \draw[message] (0,-1) -- node[above, font=\tiny] {INSERT} (2.5,-1);
+    \draw[message] (0,-1) -- node[above, font=\tiny] {POST /query} (2.5,-1);
     \draw[message] (2.5,-1.5) -- node[above, font=\tiny] {execute()} (5,-1.5);
     \draw[message, red] (5,-2) -- node[above, font=\tiny, red] {TIMEOUT} (2.5,-2);
     \node[red, font=\tiny] at (5,-2.5) {X FAILED};
     \draw[message] (2.5,-3) -- node[above, font=\tiny] {electLeader()} (7.5,-3);
     \draw[message] (7.5,-3.5) -- node[above, font=\tiny] {scores replicas} (7.5,-4);
-    \draw[message] (7.5,-4.5) -- node[above, font=\tiny] {leader=replica-3} (2.5,-4.5);
+    \draw[message] (7.5,-4.5) -- node[above, font=\tiny] {leader=instance-4} (2.5,-4.5);
     \draw[message] (2.5,-5) -- node[above, font=\tiny] {promote()} (10,-5);
     \draw[message] (10,-5.5) -- node[above, font=\tiny] {OK (new master)} (2.5,-5.5);
     \draw[message] (2.5,-6) -- node[above, font=\tiny] {retry INSERT} (10,-6);
@@ -835,17 +842,17 @@ Services interact through REST APIs:
 \hline
 \textbf{Service} & \textbf{Port} & \textbf{Key Endpoints} \\
 \hline
-Coordinator & 8000 & /query, /status, /health \\
+Coordinator & 9000 & /query, /status, /health \\
 \hline
-Timestamp 1 & 8001 & /timestamp, /health \\
+Timestamp 1 & 9001 & /timestamp, /health, /reset \\
 \hline
-Timestamp 2 & 8002 & /timestamp, /health \\
+Timestamp 2 & 9002 & /timestamp, /health, /reset \\
 \hline
-Metrics & 8003 & /metrics, /metrics/\{id\} \\
+Metrics & 9003 & /metrics, /metrics/\{id\} \\
 \hline
-Cabinet & 8004 & /select-quorum \\
+Cabinet & 9004 & /select-quorum \\
 \hline
-SEER & 8005 & /elect-leader \\
+SEER & 9005 & /elect-leader \\
 \hline
 \end{tabular}
 \label{tab:endpoints}
@@ -875,11 +882,11 @@ The \texttt{mysql-config/} directory contains configuration files and initializa
 The \texttt{docker-compose.yml} file defines the complete system topology. Key configuration aspects include:
 
 \begin{itemize}
-    \item \textbf{Network}: All containers share a custom bridge network (\texttt{db-network}) enabling DNS-based service discovery. Containers reference each other by name (e.g., \texttt{mysql-master}, \texttt{cabinet-service}).
+    \item \textbf{Network}: All containers share a custom bridge network (\texttt{db-network}) enabling DNS-based service discovery. Containers reference each other by name (e.g., \texttt{mysql-instance-1}, \texttt{cabinet-service}).
     \item \textbf{Dependencies}: Services declare dependencies to ensure proper startup order. The coordinator depends on MySQL and timestamp services; Cabinet and SEER depend on the metrics collector.
     \item \textbf{Health checks}: Each service defines a health check command. Docker Compose waits for dependencies to be healthy before starting dependent services.
-    \item \textbf{Volume mounts}: MySQL data is persisted to named volumes, surviving container restarts. Configuration files are mounted read-only from the host.
-    \item \textbf{Port mapping}: Only the coordinator (8000) and optionally the metrics collector (8003) expose ports to the host. Internal services communicate via the Docker network.
+    \item \textbf{Volume mounts}: Configuration files are mounted read-only from the host. The Docker socket is mounted for the coordinator to enable container management during failover.
+    \item \textbf{Port mapping}: The coordinator (9000), metrics collector (9003), and other services expose ports to the host. Internal services communicate via the Docker network on port 8000.
 \end{itemize}
 
 \subsection{Startup Sequence}
@@ -887,8 +894,8 @@ The \texttt{docker-compose.yml} file defines the complete system topology. Key c
 The system starts in a specific order to ensure dependencies are available:
 
 \begin{enumerate}
-    \item MySQL master starts and initializes the \texttt{testdb} database using \texttt{init.sql}
-    \item MySQL replicas start and configure replication from master using \texttt{init-replication.sh}
+    \item MySQL master (mysql-instance-1) starts and initializes the \texttt{testdb} database using \texttt{init.sql}
+    \item MySQL replicas (instance-2, instance-3, instance-4) start and configure GTID-based replication from master using \texttt{init-replication.sh}
     \item Timestamp services start (no dependencies)
     \item Metrics collector starts and begins polling MySQL instances
     \item Cabinet and SEER services start (depend on metrics collector)
@@ -941,33 +948,33 @@ Figure~\ref{fig:activity} shows the activity diagram for a write operation, illu
 \textbf{Preconditions}:
 \begin{itemize}
     \item All four MySQL instances are running and healthy
-    \item Master is mysql-master, replicas are mysql-replica-1, mysql-replica-2, mysql-replica-3
-    \item Metrics collector shows latencies: master 4ms, replica-1 12ms, replica-2 7ms, replica-3 6ms
+    \item Master is mysql-instance-1, replicas are mysql-instance-2, mysql-instance-3, mysql-instance-4
+    \item Metrics collector shows latencies: instance-1 4ms, instance-2 12ms, instance-3 7ms, instance-4 6ms
     \item Replication lag is zero for all replicas
 \end{itemize}
 
 \textbf{Steps}:
 \begin{enumerate}
-    \item Client sends HTTP POST to \texttt{http://localhost:8000/query} with body:
+    \item Client sends HTTP POST to \texttt{http://localhost:9000/query} with body:
     \begin{lstlisting}[language=json]
-{"sql": "INSERT INTO users (name, email) 
+{"query": "INSERT INTO users (name, email) 
   VALUES ('Alice', 'alice@example.com')",
- "consistency": "strong"}
+ "consistency": "STRONG"}
     \end{lstlisting}
     \item Coordinator parses the query and identifies it as a write operation
     \item Coordinator requests timestamp from timestamp-service-1, receives 5
-    \item Coordinator executes the INSERT on mysql-master with timestamp 5
+    \item Coordinator executes the INSERT on mysql-instance-1 with timestamp 5
     \item Coordinator calls Cabinet service to select quorum
-    \item Cabinet computes weights: replica-2 (0.125), replica-3 (0.143), replica-1 (0.077)
-    \item Cabinet returns quorum: [replica-3, replica-2] (top 2 by weight)
-    \item Coordinator replicates write to all replicas asynchronously
-    \item Coordinator waits for acknowledgments from replica-3 and replica-2 (quorum achieved)
+    \item Cabinet computes weights: instance-3 (0.125), instance-4 (0.143), instance-2 (0.077)
+    \item Cabinet returns quorum: [instance-4, instance-3] (top 2 by weight)
+    \item MySQL binlog replication propagates write to all replicas
+    \item Coordinator waits for instance-4 and instance-3 to catch up to timestamp 5 (quorum achieved)
     \item Coordinator returns response to client:
     \begin{lstlisting}[language=json]
-{"status": "success", 
+{"success": true, 
  "timestamp": 5, 
- "quorum_acks": 2, 
- "master": "mysql-master"}
+ "quorum_achieved": true, 
+ "executed_on": "mysql-instance-1"}
     \end{lstlisting}
 \end{enumerate}
 
@@ -999,40 +1006,42 @@ SELECT * FROM users WHERE name = 'Alice';
 
 \textbf{Preconditions}:
 \begin{itemize}
-    \item System is operating normally with mysql-master as the leader
+    \item System is operating normally with mysql-instance-1 as the leader
     \item All replicas are healthy and synchronized
-    \item Metrics show: replica-1 (latency 12ms, uptime 3600s, 0 crashes), replica-2 (latency 7ms, uptime 7200s, 0 crashes), replica-3 (latency 6ms, uptime 5400s, 0 crashes)
+    \item Metrics show: instance-2 (latency 12ms, uptime 3600s, 0 crashes), instance-3 (latency 7ms, uptime 7200s, 0 crashes), instance-4 (latency 6ms, uptime 5400s, 0 crashes)
 \end{itemize}
 
 \textbf{Steps}:
 \begin{enumerate}
-    \item Administrator simulates failure: \texttt{docker stop mysql-master}
+    \item Administrator simulates failure: \texttt{docker stop mysql-instance-1}
     \item Client sends write query to coordinator
-    \item Coordinator attempts to connect to mysql-master, receives connection timeout after 5 seconds
-    \item Coordinator logs: ``Master mysql-master unreachable, initiating failover''
-    \item Coordinator calls SEER service at \texttt{http://seer-service:8005/elect-leader}
+    \item Coordinator attempts to connect to mysql-instance-1, receives connection timeout after 5 seconds
+    \item Coordinator logs: ``Master mysql-instance-1 unreachable, initiating failover''
+    \item Coordinator calls SEER service at \texttt{http://seer-service:8000/elect-leader}
     \item SEER fetches current metrics and computes scores:
     \begin{itemize}
-        \item replica-1: latency\_score=0.077, stability\_score=0.973, lag\_score=1.0, total=0.620
-        \item replica-2: latency\_score=0.125, stability\_score=0.986, lag\_score=1.0, total=0.645
-        \item replica-3: latency\_score=0.143, stability\_score=0.982, lag\_score=1.0, total=0.650
+        \item instance-2: latency\_score=0.077, stability\_score=0.973, lag\_score=1.0, total=0.620
+        \item instance-3: latency\_score=0.125, stability\_score=0.986, lag\_score=1.0, total=0.645
+        \item instance-4: latency\_score=0.143, stability\_score=0.982, lag\_score=1.0, total=0.650
     \end{itemize}
-    \item SEER returns: \texttt{\{"new\_leader": "mysql-replica-3", "score": 0.650\}}
-    \item Coordinator promotes replica-3 to master by running \texttt{promote-to-master.sh}
-    \item Coordinator updates its internal routing table to use mysql-replica-3 as the new master
+    \item SEER returns: \texttt{\{"leader\_id": "instance-4", "score": 0.650\}}
+    \item Coordinator promotes instance-4 to master (stops replication, disables read-only)
+    \item Coordinator reconfigures instance-2 and instance-3 to replicate from new master
+    \item Coordinator updates its internal routing table to use mysql-instance-4 as the new master
     \item Coordinator retries the original write query on the new master
     \item Client receives successful response (with elevated latency due to failover overhead)
 \end{enumerate}
 
 \textbf{Failover Duration}: Total failover time in our testing: 6-8 seconds (5s timeout + 1-3s election and promotion).
 
-\textbf{Recovery}: The old master can be restarted and configured as a replica of the new master:
+\textbf{Recovery}: The old master can be restarted and configured as a replica of the new master via the admin API:
 \begin{lstlisting}[language=bash]
-docker start mysql-master
-docker exec mysql-master /scripts/demote-to-replica.sh mysql-replica-3
+curl -X POST http://localhost:9000/admin/start-instance \
+  -H "Content-Type: application/json" \
+  -d '{"instance_id": "instance-1"}'
 \end{lstlisting}
 
-\textbf{Data Consistency}: Because we use quorum-based writes, any data that was acknowledged to clients is guaranteed to exist on at least a majority of replicas. The new master (replica-3) has this data and can serve subsequent requests without data loss.
+\textbf{Data Consistency}: Because we use quorum-based verification, any data that was acknowledged to clients is guaranteed to exist on at least a majority of replicas via binlog replication. The new master (instance-4) has this data and can serve subsequent requests without data loss.
 
 \begin{figure}[!t]
 \centering
@@ -1049,31 +1058,30 @@ docker exec mysql-master /scripts/demote-to-replica.sh mysql-replica-3
 \textbf{Preconditions}:
 \begin{itemize}
     \item System operating normally with 1 master and 3 replicas
-    \item Strong consistency requires 2 of 3 replicas to acknowledge (Cabinet quorum)
+    \item Strong consistency requires 2 of 3 replicas to catch up (Cabinet quorum)
 \end{itemize}
 
 \textbf{Steps}:
 \begin{enumerate}
-    \item Client initiates write: \texttt{INSERT INTO orders (item) VALUES ('Widget')}
-    \item Coordinator obtains timestamp and executes on master
-    \item Coordinator begins replicating to all 3 replicas
-    \item Replica-1 fails mid-replication (simulated via \texttt{docker stop mysql-replica-1})
-    \item Coordinator's connection to replica-1 times out after 2 seconds
-    \item Metrics collector marks replica-1 as unhealthy in the next polling cycle
-    \item Meanwhile, replica-2 and replica-3 successfully apply the write
-    \item Coordinator receives acknowledgments from replica-2 and replica-3
-    \item Quorum is satisfied (2/3 healthy replicas acknowledged)
+    \item Client initiates write: \texttt{INSERT INTO products (name, price) VALUES ('Widget', 9.99)}
+    \item Coordinator obtains timestamp and executes on master (mysql-instance-1)
+    \item Binlog replication begins propagating to all 3 replicas
+    \item Instance-2 fails mid-replication (simulated via \texttt{docker stop mysql-instance-2})
+    \item Metrics collector marks instance-2 as unhealthy in the next polling cycle
+    \item Meanwhile, instance-3 and instance-4 successfully apply the write via binlog
+    \item Coordinator verifies instance-3 and instance-4 have caught up to the timestamp
+    \item Quorum is satisfied (2/3 healthy replicas caught up)
     \item Coordinator returns success to client
 \end{enumerate}
 
 \textbf{Key Observations}:
 \begin{itemize}
-    \item The write succeeded despite replica-1's failure because quorum only requires a majority
-    \item Cabinet's next quorum selection will exclude replica-1 (weight = 0 due to unhealthy status)
-    \item When replica-1 recovers, it will catch up via replication from the master
+    \item The write succeeded despite instance-2's failure because quorum only requires a majority
+    \item Cabinet's next quorum selection will exclude instance-2 (weight = 0 due to unhealthy status)
+    \item When instance-2 recovers, it will catch up via binlog replication from the master
 \end{itemize}
 
-\textbf{Data Consistency}: The data remains consistent because quorum ensures that any subsequent read quorum will overlap with the write quorum. Even if replica-1 returns with stale data, reads with QUORUM consistency will contact at least one of the replicas that has the new data.
+\textbf{Data Consistency}: The data remains consistent because quorum ensures that any subsequent read quorum will overlap with the write quorum. Even if instance-2 returns with stale data, reads with Strong consistency will contact at least one of the replicas that has the new data.
 
 \begin{figure}[!t]
 \centering
@@ -1114,7 +1122,7 @@ docker exec mysql-master /scripts/demote-to-replica.sh mysql-replica-3
 
 \textbf{Performance Impact}: During single-server operation, timestamp throughput is halved. If timestamp generation becomes a bottleneck, writes may experience increased latency. In our experiments, a single timestamp server could handle over 1000 requests/second, far exceeding our write throughput, so no practical degradation was observed.
 
-\textbf{Recovery}: When timestamp-service-1 restarts, it resumes from its persisted counter value (or from the configured start value if no persistence is implemented). The coordinator's health check detects the recovery and resumes distributing requests to both servers.
+\textbf{Recovery}: When timestamp-service-1 restarts, it resumes from its configured start value (odd numbers). Since counters are not persisted, the \texttt{POST /reset} endpoint can be used to reset counters when clearing test data. The coordinator's health check detects the recovery and resumes distributing requests to both servers.
 
 \begin{figure}[!t]
 \centering
@@ -1136,22 +1144,22 @@ docker exec mysql-master /scripts/demote-to-replica.sh mysql-replica-3
 
 \textbf{Steps}:
 \begin{enumerate}
-    \item Execute INSERT with consistency=strong:
+    \item Execute INSERT with consistency=STRONG:
     \begin{lstlisting}[language=bash]
-curl -X POST http://localhost:8000/query \
+curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
-  -d '{"sql": "INSERT INTO users (name) VALUES ('TestUser')", "consistency": "strong"}'
+  -d '{"query": "INSERT INTO users (name, email) VALUES ('TestUser', 'test@example.com')", "consistency": "STRONG"}'
     \end{lstlisting}
-    \item Verify response indicates quorum achieved (check \texttt{quorum\_acks} field)
+    \item Verify response indicates quorum achieved (check \texttt{quorum\_achieved} field)
     \item Query all replicas directly to verify data presence:
     \begin{lstlisting}[language=bash]
-for i in 1 2 3; do
-  docker exec mysql-replica-$i mysql -e "SELECT * FROM testdb.users WHERE name='TestUser';"
+for i in 2 3 4; do
+  docker exec mysql-instance-$i mysql -u root -prootpass -e "SELECT * FROM testdb.users WHERE name='TestUser';"
 done
     \end{lstlisting}
 \end{enumerate}
 
-\textbf{Expected Result}: Response shows \texttt{quorum\_acks: 2}, all replicas return the inserted row.
+\textbf{Expected Result}: Response shows \texttt{quorum\_achieved: true}, all replicas return the inserted row.
 
 \textbf{Actual Result}: PASS - All replicas received the write, quorum achieved in 35ms.
 
@@ -1159,47 +1167,49 @@ done
 
 \textbf{Objective}: Verify reads go to lowest-latency replica based on metrics.
 
-\textbf{Preconditions}: Metrics collector has recent data showing replica-3 has lowest latency.
+\textbf{Preconditions}: Metrics collector has recent data showing instance-4 has lowest latency.
 
 \textbf{Steps}:
 \begin{enumerate}
     \item Check metrics to identify lowest-latency replica:
     \begin{lstlisting}[language=bash]
-curl http://localhost:8003/metrics
-# Returns latencies: replica-1: 12ms, replica-2: 7ms, replica-3: 6ms
+curl http://localhost:9003/metrics
+# Returns latencies: instance-2: 12ms, instance-3: 7ms, instance-4: 6ms
     \end{lstlisting}
     \item Execute SELECT query and observe which replica handles it:
     \begin{lstlisting}[language=bash]
-curl -X POST http://localhost:8000/query \
-  -d '{"sql": "SELECT * FROM users", "consistency": "eventual"}'
+curl -X POST http://localhost:9000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "SELECT * FROM users", "consistency": "EVENTUAL"}'
     \end{lstlisting}
     \item Verify response metadata shows expected replica
 \end{enumerate}
 
-\textbf{Expected Result}: Response indicates query was served by replica-3.
+\textbf{Expected Result}: Response indicates query was served by instance-4.
 
-\textbf{Actual Result}: PASS - Read executed on replica-3 (6.38ms latency).
+\textbf{Actual Result}: PASS - Read executed on instance-4 (6.38ms latency).
 
 \subsection{Test Case 3: Master Failover}
 
 \textbf{Objective}: Verify automatic failover works when master becomes unavailable.
 
-\textbf{Preconditions}: System running with mysql-master as leader.
+\textbf{Preconditions}: System running with mysql-instance-1 as leader.
 
 \textbf{Steps}:
 \begin{enumerate}
     \item Stop master container:
     \begin{lstlisting}[language=bash]
-docker stop mysql-master
+docker stop mysql-instance-1
     \end{lstlisting}
     \item Execute write query (will trigger failover):
     \begin{lstlisting}[language=bash]
-curl -X POST http://localhost:8000/query \
-  -d '{"sql": "INSERT INTO users (name) VALUES ('AfterFailover')", "consistency": "strong"}'
+curl -X POST http://localhost:9000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "INSERT INTO users (name, email) VALUES ('AfterFailover', 'after@test.com')", "consistency": "STRONG"}'
     \end{lstlisting}
     \item Check system status to verify new master:
     \begin{lstlisting}[language=bash]
-curl http://localhost:8000/status
+curl http://localhost:9000/status
 # Should show new master
     \end{lstlisting}
     \item Verify write succeeded on new master
@@ -1207,7 +1217,7 @@ curl http://localhost:8000/status
 
 \textbf{Expected Result}: SEER elects a new leader, write completes successfully.
 
-\textbf{Actual Result}: PASS - SEER elected replica-3 with score 0.650, write succeeded.
+\textbf{Actual Result}: PASS - SEER elected instance-4 with score 0.650, write succeeded.
 
 \subsection{Test Case 4: Concurrent Write Ordering}
 
@@ -1222,8 +1232,8 @@ curl http://localhost:8000/status
 import asyncio, httpx
 
 async def insert(client, i):
-    resp = await client.post("http://localhost:8000/query",
-        json={"sql": f"INSERT INTO test (val) VALUES ({i})"})
+    resp = await client.post("http://localhost:9000/query",
+        json={"query": f"INSERT INTO users (name, email) VALUES ('User{i}', 'user{i}@test.com')", "consistency": "STRONG"})
     return resp.json()["timestamp"]
 
 async def main():
@@ -1252,7 +1262,7 @@ async def main():
 \begin{enumerate}
     \item Execute 20 writes with each consistency level, measuring latency:
     \begin{lstlisting}[language=python]
-for level in ["eventual", "strong"]:
+for level in ["EVENTUAL", "STRONG"]:
     times = []
     for i in range(20):
         start = time.time()
@@ -1275,13 +1285,13 @@ for level in ["eventual", "strong"]:
 
 \textbf{Steps}:
 \begin{enumerate}
-    \item Stop one replica: \texttt{docker stop mysql-replica-1}
+    \item Stop one replica: \texttt{docker stop mysql-instance-2}
     \item Wait for metrics collector to detect failure (5-10 seconds)
     \item Execute write with Strong consistency
     \item Verify quorum is formed from remaining healthy replicas
 \end{enumerate}
 
-\textbf{Result}: PASS - Cabinet selected quorum from replica-2 and replica-3 only.
+\textbf{Result}: PASS - Cabinet selected quorum from instance-3 and instance-4 only.
 
 %==============================================================================
 \section{Performance Analysis}
@@ -1469,7 +1479,7 @@ While our system demonstrates key distributed systems concepts, several limitati
 \begin{enumerate}
     \item \textbf{Single Coordinator}: The coordinator is a single point of failure. If it crashes, no client requests can be processed until it restarts. A production system should replicate coordinators using consensus (e.g., Raft) and use a load balancer to distribute client connections.
     
-    \item \textbf{Application-Level Replication}: We implement replication at the application layer rather than using MySQL's native binary log replication. This simplifies implementation and makes the replication logic visible for educational purposes, but it is less efficient than streaming replication and does not capture schema changes or non-deterministic functions correctly.
+    \item \textbf{Logical Timestamp Tracking}: While we use MySQL's native GTID-based binlog replication for data propagation, we maintain a separate logical timestamp in the \texttt{\_metadata} table for quorum verification. This adds overhead compared to purely relying on GTID positions, but provides clearer semantics for our Cabinet algorithm.
     
     \item \textbf{No Distributed Transactions}: Multi-statement transactions are not supported across replicas. Each SQL statement is treated as an independent operation. Supporting distributed transactions would require implementing two-phase commit or a similar protocol, significantly increasing complexity.
     
