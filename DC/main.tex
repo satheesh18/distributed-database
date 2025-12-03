@@ -540,102 +540,60 @@ Four MySQL 8.0 containers form the data layer: one master (\texttt{mysql-master}
 
 The master accepts both reads and writes, while replicas are read-only. When a failover occurs, the coordinator runs the promotion script on the new master and demotion scripts on the remaining replicas to reconfigure replication.
 
-\subsection{Component Diagram}
+% \subsection{Component Diagram}
 
-Figure~\ref{fig:component} shows the component interactions in our system.
+% Figure~\ref{fig:component} shows the component interactions in our system.
 
-\begin{figure}[!t]
-\centering
-\begin{tikzpicture}[node distance=1.2cm, scale=0.75, transform shape]
-    % Client
-    \node[component, fill=yellow!20] (client) {Client};
+% \begin{figure}[!t]
+% \centering
+% \begin{tikzpicture}[node distance=1.2cm, scale=0.75, transform shape]
+%     % Client
+%     \node[component, fill=yellow!20] (client) {Client};
     
-    % Coordinator
-    \node[component, below=of client, fill=green!20, text width=2.5cm] (coord) {Coordinator\\(FastAPI)};
+%     % Coordinator
+%     \node[component, below=of client, fill=green!20, text width=2.5cm] (coord) {Coordinator\\(FastAPI)};
     
-    % Services row
-    \node[component, below left=1cm and 1.5cm of coord] (ts1) {Timestamp\\Server 1};
-    \node[component, right=0.3cm of ts1] (ts2) {Timestamp\\Server 2};
-    \node[component, right=0.3cm of ts2] (metrics) {Metrics\\Collector};
-    \node[component, right=0.3cm of metrics] (cabinet) {Cabinet};
-    \node[component, right=0.3cm of cabinet] (seer) {SEER};
+%     % Services row
+%     \node[component, below left=1cm and 1.5cm of coord] (ts1) {Timestamp\\Server 1};
+%     \node[component, right=0.3cm of ts1] (ts2) {Timestamp\\Server 2};
+%     \node[component, right=0.3cm of ts2] (metrics) {Metrics\\Collector};
+%     \node[component, right=0.3cm of metrics] (cabinet) {Cabinet};
+%     \node[component, right=0.3cm of cabinet] (seer) {SEER};
     
-    % Databases
-    \node[database, below=2cm of ts1] (master) {Master};
-    \node[database, right=0.5cm of master] (r1) {Replica 1};
-    \node[database, right=0.5cm of r1] (r2) {Replica 2};
-    \node[database, right=0.5cm of r2] (r3) {Replica 3};
+%     % Databases
+%     \node[database, below=2cm of ts1] (master) {Master};
+%     \node[database, right=0.5cm of master] (r1) {Replica 1};
+%     \node[database, right=0.5cm of r1] (r2) {Replica 2};
+%     \node[database, right=0.5cm of r2] (r3) {Replica 3};
     
-    % Arrows
-    \draw[arrow] (client) -- (coord);
-    \draw[arrow] (coord) -- (ts1);
-    \draw[arrow] (coord) -- (ts2);
-    \draw[arrow] (coord) -- (cabinet);
-    \draw[arrow] (coord) -- (seer);
-    \draw[arrow] (cabinet) -- (metrics);
-    \draw[arrow] (seer) -- (metrics);
-    \draw[arrow] (coord) -- (master);
-    \draw[dashedarrow] (coord) -- (r1);
-    \draw[dashedarrow] (coord) -- (r2);
-    \draw[dashedarrow] (coord) -- (r3);
-    \draw[arrow] (metrics) -- (master);
-    \draw[arrow] (metrics) -- (r1);
-    \draw[arrow] (metrics) -- (r2);
-    \draw[arrow] (metrics) -- (r3);
-\end{tikzpicture}
-\caption{Component Diagram showing service dependencies.}
-\label{fig:component}
-\end{figure}
+%     % Arrows
+%     \draw[arrow] (client) -- (coord);
+%     \draw[arrow] (coord) -- (ts1);
+%     \draw[arrow] (coord) -- (ts2);
+%     \draw[arrow] (coord) -- (cabinet);
+%     \draw[arrow] (coord) -- (seer);
+%     \draw[arrow] (cabinet) -- (metrics);
+%     \draw[arrow] (seer) -- (metrics);
+%     \draw[arrow] (coord) -- (master);
+%     \draw[dashedarrow] (coord) -- (r1);
+%     \draw[dashedarrow] (coord) -- (r2);
+%     \draw[dashedarrow] (coord) -- (r3);
+%     \draw[arrow] (metrics) -- (master);
+%     \draw[arrow] (metrics) -- (r1);
+%     \draw[arrow] (metrics) -- (r2);
+%     \draw[arrow] (metrics) -- (r3);
+% \end{tikzpicture}
+% \caption{Component Diagram showing service dependencies.}
+% \label{fig:component}
+% \end{figure}
 
 \subsection{Deployment Diagram}
 
 Figure~\ref{fig:deployment} shows the deployment diagram illustrating how our system components are deployed across Docker containers on the host machine.
 
-\begin{figure}[!t]
+\begin{figure}[h]
 \centering
-\begin{tikzpicture}[scale=0.65, transform shape]
-    % Host Machine
-    \node[rectangle, draw, thick, fill=gray!10, minimum width=9cm, minimum height=7cm] (host) at (4,-2.5) {};
-    \node[font=\footnotesize\bfseries] at (4,1.2) {<<device>>};
-    \node[font=\footnotesize] at (4,0.8) {Host Machine (Docker Host)};
-    
-    % Docker Network
-    \node[rectangle, draw, dashed, fill=blue!5, minimum width=8.5cm, minimum height=6cm] (network) at (4,-2.8) {};
-    \node[font=\tiny] at (4,-0.1) {<<network>> db-network};
-    
-    % Coordinator Container
-    \node[rectangle, draw, fill=green!20, minimum width=2cm, minimum height=1cm, font=\tiny] (coord) at (1,-1) {<<container>>\\coordinator:8000};
-    
-    % Timestamp Containers
-    \node[rectangle, draw, fill=cyan!20, minimum width=1.5cm, minimum height=0.8cm, font=\tiny] (ts1) at (4,-1) {<<container>>\\ts-1:8001};
-    \node[rectangle, draw, fill=cyan!20, minimum width=1.5cm, minimum height=0.8cm, font=\tiny] (ts2) at (6.5,-1) {<<container>>\\ts-2:8002};
-    
-    % Service Containers
-    \node[rectangle, draw, fill=yellow!20, minimum width=1.3cm, minimum height=0.8cm, font=\tiny] (metrics) at (0.5,-2.5) {<<container>>\\metrics:8003};
-    \node[rectangle, draw, fill=orange!20, minimum width=1.3cm, minimum height=0.8cm, font=\tiny] (cabinet) at (2.5,-2.5) {<<container>>\\cabinet:8004};
-    \node[rectangle, draw, fill=red!20, minimum width=1.3cm, minimum height=0.8cm, font=\tiny] (seer) at (4.5,-2.5) {<<container>>\\seer:8005};
-    
-    % MySQL Containers
-    \node[rectangle, draw, fill=purple!20, minimum width=1.5cm, minimum height=0.8cm, font=\tiny] (master) at (1,-4.2) {<<container>>\\mysql-master\\:3306};
-    \node[rectangle, draw, fill=purple!15, minimum width=1.3cm, minimum height=0.7cm, font=\tiny] (r1) at (3.2,-4.2) {<<container>>\\replica-1};
-    \node[rectangle, draw, fill=purple!15, minimum width=1.3cm, minimum height=0.7cm, font=\tiny] (r2) at (5.2,-4.2) {<<container>>\\replica-2};
-    \node[rectangle, draw, fill=purple!15, minimum width=1.3cm, minimum height=0.7cm, font=\tiny] (r3) at (7.2,-4.2) {<<container>>\\replica-3};
-    
-    % Volumes
-    \node[rectangle, draw, fill=gray!30, minimum width=1.2cm, minimum height=0.5cm, font=\tiny] (vol) at (1,-5.3) {<<volume>>\\mysql-data};
-    
-    % External client
-    \node[rectangle, draw, fill=white, minimum width=1.5cm, minimum height=0.8cm, font=\tiny] (client) at (1,2.2) {<<external>>\\Client App};
-    
-    % Connections
-    \draw[->] (client) -- (coord);
-    \draw[->] (coord) -- (ts1);
-    \draw[->] (coord) -- (ts2);
-    \draw[->] (coord) -- (master);
-    \draw[->] (cabinet) -- (metrics);
-    \draw[->] (seer) -- (metrics);
-    \draw[->] (master) -- (vol);
-\end{tikzpicture}
+\includegraphics[width=\linewidth]{images/deploymentdiagram.png}
 \caption{Deployment Diagram showing Docker container topology and network configuration.}
 \label{fig:deployment}
 \end{figure}
@@ -830,26 +788,9 @@ Figure~\ref{fig:seq-failover} shows the failover sequence when the master fails.
 
 Figure~\ref{fig:state} shows the possible states of a MySQL replica.
 
-\begin{figure}[!t]
+\begin{figure}[h]
 \centering
-\begin{tikzpicture}[node distance=2cm, scale=0.85, transform shape]
-    % States
-    \node[state, fill=gray!20] (init) {Initializing};
-    \node[state, right=of init] (healthy) {Healthy\\Replica};
-    \node[state, below=of healthy] (lagging) {Lagging};
-    \node[state, right=of healthy, fill=green!30] (master) {Master};
-    \node[state, below=of init, fill=red!20] (failed) {Failed};
-    
-    % Transitions
-    \draw[arrow] (init) -- node[above, font=\tiny] {startup} (healthy);
-    \draw[arrow] (healthy) -- node[right, font=\tiny] {lag > threshold} (lagging);
-    \draw[arrow] (lagging) -- node[left, font=\tiny] {caught up} (healthy);
-    \draw[arrow] (healthy) -- node[above, font=\tiny] {SEER elect} (master);
-    \draw[arrow] (healthy) -- node[above, font=\tiny, sloped] {crash} (failed);
-    \draw[arrow] (lagging) -- node[below, font=\tiny, sloped] {crash} (failed);
-    \draw[arrow] (failed) -- node[left, font=\tiny] {restart} (init);
-    \draw[arrow] (master) to[bend right=40] node[below, font=\tiny] {demoted} (healthy);
-\end{tikzpicture}
+\includegraphics[width=\linewidth]{images/statediagram.png}
 \caption{State Diagram for MySQL Replica Lifecycle.}
 \label{fig:state}
 \end{figure}
@@ -962,50 +903,7 @@ Figure~\ref{fig:class} shows the key modules and their relationships.
 
 \begin{figure}[h]
 \centering
-\begin{tikzpicture}[scale=0.75, transform shape]
-    % Coordinator module
-    \node[rectangle, draw, fill=blue!15, minimum width=4cm, minimum height=2.5cm] (coord) at (0,0) {};
-    \node[font=\footnotesize\bfseries] at (0,0.8) {Coordinator};
-    \draw[thick] (-2,-0.5) -- (2,-0.5);
-    \node[font=\tiny, align=left] at (0,-0.1) {+ execute\_query()};
-    \node[font=\tiny, align=left] at (0,-0.5) {+ handle\_failover()};
-    \node[font=\tiny, align=left] at (0,-0.9) {+ replicate\_write()};
-    
-    % TimestampService
-    \node[rectangle, draw, fill=green!15, minimum width=3cm, minimum height=1.8cm] (ts) at (-4,-3) {};
-    \node[font=\footnotesize\bfseries] at (-4,-2.3) {TimestampService};
-    \draw[thick] (-5.5,-2.7) -- (-2.5,-2.7);
-    \node[font=\tiny] at (-4,-3.1) {+ get\_timestamp()};
-    \node[font=\tiny] at (-4,-3.5) {- counter: int};
-    
-    % Cabinet
-    \node[rectangle, draw, fill=yellow!15, minimum width=3cm, minimum height=1.8cm] (cab) at (0,-3) {};
-    \node[font=\footnotesize\bfseries] at (0,-2.3) {CabinetService};
-    \draw[thick] (-1.5,-2.7) -- (1.5,-2.7);
-    \node[font=\tiny] at (0,-3.1) {+ select\_quorum()};
-    \node[font=\tiny] at (0,-3.5) {+ calc\_weight()};
-    
-    % SEER
-    \node[rectangle, draw, fill=orange!15, minimum width=3cm, minimum height=1.8cm] (seer) at (4,-3) {};
-    \node[font=\footnotesize\bfseries] at (4,-2.3) {SEERService};
-    \draw[thick] (2.5,-2.7) -- (5.5,-2.7);
-    \node[font=\tiny] at (4,-3.1) {+ elect\_leader()};
-    \node[font=\tiny] at (4,-3.5) {+ calc\_score()};
-    
-    % MetricsCollector
-    \node[rectangle, draw, fill=purple!15, minimum width=3cm, minimum height=1.8cm] (metrics) at (2,-5.5) {};
-    \node[font=\footnotesize\bfseries] at (2,-4.8) {MetricsCollector};
-    \draw[thick] (0.5,-5.2) -- (3.5,-5.2);
-    \node[font=\tiny] at (2,-5.6) {+ get\_metrics()};
-    \node[font=\tiny] at (2,-6) {+ poll\_instances()};
-    
-    % Arrows
-    \draw[arrow] (coord) -- node[left, font=\tiny] {uses} (ts);
-    \draw[arrow] (coord) -- node[left, font=\tiny] {uses} (cab);
-    \draw[arrow] (coord) -- node[right, font=\tiny] {uses} (seer);
-    \draw[arrow] (cab) -- node[left, font=\tiny] {queries} (metrics);
-    \draw[arrow] (seer) -- node[right, font=\tiny] {queries} (metrics);
-\end{tikzpicture}
+\includegraphics[width=\linewidth]{images/classdiagram.png}
 \caption{Class/Module Diagram showing service relationships.}
 \label{fig:class}
 \end{figure}
@@ -1014,40 +912,9 @@ Figure~\ref{fig:class} shows the key modules and their relationships.
 
 Figure~\ref{fig:object} shows an object diagram representing a snapshot of the system at runtime during a typical write operation, illustrating actual object instances and their current state.
 
-\begin{figure}[!t]
+\begin{figure}[h]
 \centering
-\begin{tikzpicture}[scale=0.7, transform shape]
-    % Coordinator instance
-    \node[rectangle, draw, fill=blue!15, minimum width=3.5cm, minimum height=2cm] (coord) at (0,0) {};
-    \node[font=\footnotesize, text decoration=underline] at (0,0.7) {\underline{coord1:Coordinator}};
-    \draw[thick] (-1.75,-0.1) -- (1.75,-0.1);
-    \node[font=\tiny, align=left] at (0,-0.4) {current\_master = ``mysql-master''};
-    \node[font=\tiny, align=left] at (0,-0.8) {consistency = ``strong''};
-    
-    % Timestamp instance
-    \node[rectangle, draw, fill=green!15, minimum width=3cm, minimum height=1.5cm] (ts) at (-3.5,-2.5) {};
-    \node[font=\footnotesize] at (-3.5,-1.9) {\underline{ts1:TimestampService}};
-    \draw[thick] (-5,-2.3) -- (-2,-2.3);
-    \node[font=\tiny] at (-3.5,-2.7) {counter = 127};
-    
-    % Cabinet instance  
-    \node[rectangle, draw, fill=yellow!15, minimum width=3cm, minimum height=1.5cm] (cab) at (0,-2.5) {};
-    \node[font=\footnotesize] at (0,-1.9) {\underline{cab1:CabinetService}};
-    \draw[thick] (-1.5,-2.3) -- (1.5,-2.3);
-    \node[font=\tiny] at (0,-2.7) {quorum\_size = 2};
-    
-    % Metrics instance
-    \node[rectangle, draw, fill=purple!15, minimum width=3cm, minimum height=1.8cm] (met) at (3.5,-2.5) {};
-    \node[font=\footnotesize] at (3.5,-1.8) {\underline{m1:MetricsCollector}};
-    \draw[thick] (2,-2.2) -- (5,-2.2);
-    \node[font=\tiny, align=left] at (3.5,-2.6) {poll\_interval = 5s};
-    \node[font=\tiny, align=left] at (3.5,-3) {instances = 4};
-    
-    % Links
-    \draw[->] (coord) -- node[left, font=\tiny] {requests} (ts);
-    \draw[->] (coord) -- node[left, font=\tiny] {selects} (cab);
-    \draw[->] (cab) -- node[above, font=\tiny] {queries} (met);
-\end{tikzpicture}
+\includegraphics[width=\linewidth]{images/objectdiagram.png}
 \caption{Object Diagram showing runtime instances during a write operation.}
 \label{fig:object}
 \end{figure}
@@ -1058,51 +925,7 @@ Figure~\ref{fig:activity} shows the activity diagram for a write operation, illu
 
 \begin{figure}[!t]
 \centering
-\begin{tikzpicture}[scale=0.65, transform shape, node distance=0.8cm]
-    % Start
-    \node[circle, fill=black, minimum size=0.4cm] (start) at (0,0) {};
-    
-    % Activities
-    \node[rectangle, rounded corners, draw, fill=blue!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of start] (a1) {Receive SQL Query};
-    \node[rectangle, rounded corners, draw, fill=blue!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of a1] (a2) {Parse Query Type};
-    
-    % Decision
-    \node[diamond, draw, fill=yellow!20, minimum size=0.8cm, font=\tiny, below=of a2] (d1) {};
-    \node[font=\tiny] at (0,-3.7) {Write?};
-    
-    % Write path
-    \node[rectangle, rounded corners, draw, fill=green!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below left=0.8cm and 0.5cm of d1] (a3) {Get Timestamp};
-    \node[rectangle, rounded corners, draw, fill=green!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of a3] (a4) {Execute on Master};
-    \node[rectangle, rounded corners, draw, fill=green!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of a4] (a5) {Select Quorum (Cabinet)};
-    \node[rectangle, rounded corners, draw, fill=green!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of a5] (a6) {Replicate to Quorum};
-    \node[rectangle, rounded corners, draw, fill=green!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of a6] (a7) {Wait for Acks};
-    
-    % Read path
-    \node[rectangle, rounded corners, draw, fill=orange!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below right=0.8cm and 0.5cm of d1] (r1) {Select Best Replica};
-    \node[rectangle, rounded corners, draw, fill=orange!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny, below=of r1] (r2) {Execute Query};
-    
-    % Merge
-    \node[rectangle, rounded corners, draw, fill=blue!10, minimum width=2.5cm, minimum height=0.6cm, font=\tiny] (a8) at (0,-10) {Return Response};
-    
-    % End
-    \node[circle, draw, fill=black, minimum size=0.3cm, below=of a8] (end) {};
-    \node[circle, draw, minimum size=0.5cm, below=of a8] (endouter) {};
-    
-    % Arrows
-    \draw[->] (start) -- (a1);
-    \draw[->] (a1) -- (a2);
-    \draw[->] (a2) -- (d1);
-    \draw[->] (d1) -| node[above, font=\tiny] {Yes} (a3);
-    \draw[->] (d1) -| node[above, font=\tiny] {No} (r1);
-    \draw[->] (a3) -- (a4);
-    \draw[->] (a4) -- (a5);
-    \draw[->] (a5) -- (a6);
-    \draw[->] (a6) -- (a7);
-    \draw[->] (a7) |- (a8);
-    \draw[->] (r1) -- (r2);
-    \draw[->] (r2) |- (a8);
-    \draw[->] (a8) -- (endouter);
-\end{tikzpicture}
+\includegraphics[width=\linewidth]{images/activitydiagram.png}
 \caption{Activity Diagram showing the flow of a query through the system.}
 \label{fig:activity}
 \end{figure}
@@ -1720,8 +1543,6 @@ Several extensions would make this system more complete and production-ready:
 \begin{enumerate}
     \item \textbf{Coordinator high availability}: Implement coordinator replication using Raft consensus. Currently, the coordinator is a single point of failure; running multiple coordinators with leader election would eliminate this weakness.
     
-    \item \textbf{MySQL native replication}: Integrate MySQL's built-in binary log replication for better durability and performance. Our application-level replication is educational but less efficient than native streaming replication.
-    
     \item \textbf{Comprehensive benchmarking}: Add support for standard benchmarks like YCSB (Yahoo! Cloud Serving Benchmark) and TPC-C to enable rigorous comparison with other distributed databases.
     
     \item \textbf{Network partition simulation}: Use tools like Toxiproxy or Chaos Monkey to simulate network partitions and measure how the system behaves under partial connectivity.
@@ -1734,70 +1555,10 @@ Several extensions would make this system more complete and production-ready:
 \end{enumerate}
 
 %==============================================================================
-\section{Team Contributions}
-%==============================================================================
-
-All team members contributed to the design, implementation, and evaluation of the system. The project was developed collaboratively over approximately 8 weeks, with regular meetings to coordinate efforts and resolve design decisions.
-
-\subsection{Individual Responsibilities}
-
-The primary responsibilities were divided as follows:
-
-\textbf{Keyaba Gohil}:
-\begin{itemize}
-    \item Designed and implemented the Cabinet quorum selection algorithm and service
-    \item Designed and implemented the SEER leader election algorithm and service
-    \item Integrated Cabinet and SEER with the metrics collector
-    \item Developed unit tests for quorum and leader election logic
-    \item Contributed to the literature review, focusing on the Cabinet and SEER papers
-\end{itemize}
-
-\textbf{Jayateerth Kamatgi}:
-\begin{itemize}
-    \item Led the implementation of the metrics collector service
-    \item Configured MySQL deployment including Dockerfiles and initialization scripts
-    \item Implemented health monitoring, latency measurement, and lag tracking
-    \item Developed the promotion and demotion scripts for failover
-    \item Contributed to system testing and failure scenario demonstrations
-    \item Wrote the sections on implementation details and performance analysis
-\end{itemize}
-
-\textbf{Satheesh Kumar G R}:
-\begin{itemize}
-    \item Implemented the coordinator service including query parsing and routing
-    \item Designed and implemented the timestamp service (both instances)
-    \item Integrated all microservices and coordinated the Docker Compose setup
-    \item Developed the stress test script and concurrent write tests
-    \item Led the overall system architecture design
-    \item Coordinated report writing and prepared diagrams
-\end{itemize}
-
-\subsection{Shared Activities}
-
-The following activities were shared across the team:
-\begin{itemize}
-    \item Initial system design and architecture decisions
-    \item Literature review and paper selection (2 papers per person)
-    \item Code reviews and integration testing
-    \item Debugging distributed issues and race conditions
-    \item Report writing, editing, and proofreading
-    \item Preparation of presentation slides and demo recording
-\end{itemize}
-
-\subsection{Development Timeline}
-
-\begin{itemize}
-    \item \textbf{Weeks 1-2}: Project proposal, literature review, architecture design
-    \item \textbf{Weeks 3-4}: Core services implementation (coordinator, timestamp, MySQL setup)
-    \item \textbf{Weeks 5-6}: Algorithm implementation (Cabinet, SEER, metrics collector)
-    \item \textbf{Weeks 7-8}: Integration, testing, evaluation, and report writing
-\end{itemize}
-
-%==============================================================================
 \section*{Acknowledgment}
 %==============================================================================
 
-We thank the course instructors and TAs for their guidance throughout this project. The research papers on timestamps, Cabinet, and SEER provided the theoretical foundation for our implementation.
+We thank the course instructor for guidance throughout this project. The research papers on timestamps, consistency and replication, and leader election provided the theoretical foundation for our implementation.
 
 %==============================================================================
 % References
