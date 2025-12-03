@@ -8,7 +8,7 @@ replication using Cabinet algorithm and logical timestamps.
 >>> STEP 1: Client sends INSERT request to Coordinator
     POST http://coordinator:8000/query
     Body: {
-      "query": "INSERT INTO products (name, price) VALUES ('Demo Widget', 49.99)",
+      "query": "INSERT INTO products (name, price) VALUES ('Demo', 49.99)",
       "consistency": "STRONG"
     }
 
@@ -19,15 +19,14 @@ replication using Cabinet algorithm and logical timestamps.
 >>> STEP 3: Coordinator checks replica health via Metrics Collector
     GET http://metrics-collector:8000/metrics
     Response:
-    {
-      "replicas": [
-        {"replica_id": "instance-1", "latency_ms": 9.51, "replication_lag": 0, "is_healthy": true},
-        {"replica_id": "instance-2", "latency_ms": 8.45, "replication_lag": 0, "is_healthy": true},
-        {"replica_id": "instance-3", "latency_ms": 6.95, "replication_lag": 0, "is_healthy": true},
-        {"replica_id": "instance-4", "latency_ms": 6.74, "replication_lag": 0, "is_healthy": true}
-      ],
-      "master_timestamp": 105
-    }
+    +-------------+-----------+--------+-----------+
+    | Instance    | Latency   | Lag    | Healthy   |
+    +-------------+-----------+--------+-----------+
+    | instance-1  | 9.51ms    | 0      | true      |
+    | instance-2  | 8.45ms    | 0      | true      |
+    | instance-3  | 6.95ms    | 0      | true      |
+    | instance-4  | 6.74ms    | 0      | true      |
+    +-------------+-----------+--------+-----------+
 
 >>> STEP 4: Cabinet selects optimal quorum based on latency weights
     POST http://cabinet-service:8000/select-quorum
@@ -44,7 +43,7 @@ replication using Cabinet algorithm and logical timestamps.
     - instance-2: weight=0.118 (latency=8.45ms)
 
 >>> STEP 5: Coordinator executes write on Master (mysql-instance-1)
-    SQL: INSERT INTO products (name, price, timestamp) VALUES ('Demo Widget', 49.99, 107)
+    SQL: INSERT INTO products (name, price, timestamp) VALUES (...)
     Result: 1 row affected
 
 >>> STEP 6: MySQL binlog replicates to all replicas asynchronously
@@ -53,15 +52,14 @@ replication using Cabinet algorithm and logical timestamps.
 
 >>> STEP 7: Coordinator waits for quorum replicas to catch up
     Checking _metadata.latest_timestamp >= 107 on:
-    - instance-4: timestamp=107 ✓ (caught up in 12ms)
-    - instance-3: timestamp=107 ✓ (caught up in 15ms)
+    - instance-4: timestamp=107 (caught up in 12ms)
+    - instance-3: timestamp=107 (caught up in 15ms)
     Quorum achieved: 2/3 replicas confirmed
 
 >>> STEP 8: Success response returned to client
     Response: {
       "success": true,
-      "message": "Write successful (consistency: STRONG, timestamp: 107, 
-                  Cabinet replicas: instance-4, instance-3, instance-2)",
+      "message": "Write successful (STRONG, timestamp: 107)",
       "timestamp": 107,
       "rows_affected": 1,
       "executed_on": "mysql-instance-1",
@@ -83,9 +81,8 @@ replication using Cabinet algorithm and logical timestamps.
    KEY OBSERVATIONS
 ============================================================
 
-✓ Timestamp Service provided globally unique, monotonically increasing timestamp
-✓ Cabinet selected fastest replicas (instance-4, instance-3) based on latency
-✓ Write executed on master with binlog replication enabled
-✓ Quorum (2 of 3) replicas confirmed write before returning success
-✓ Strong consistency guarantee: any subsequent read will see this write
-
+[OK] Timestamp Service provided globally unique timestamp
+[OK] Cabinet selected fastest replicas based on latency
+[OK] Write executed on master with binlog replication
+[OK] Quorum (2 of 3) replicas confirmed write before success
+[OK] Strong consistency guarantee maintained

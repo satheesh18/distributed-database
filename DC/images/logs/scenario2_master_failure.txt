@@ -19,16 +19,16 @@ when the master database crashes.
     POST http://seer-service:8000/elect-leader
     
     SEER Scoring Formula:
-    score = w1 * (1/latency) + w2 * uptime + w3 * (1/(lag+1)) + w4 * (1/(crashes+1))
+    score = w1*(1/latency) + w2*uptime + w3*(1/(lag+1)) + w4*(1/(crashes+1))
     
     Candidate Scores:
-    ┌─────────────┬──────────┬───────────┬─────────┬──────────┬─────────┐
-    │ Instance    │ Latency  │ Uptime(s) │ Lag     │ Crashes  │ Score   │
-    ├─────────────┼──────────┼───────────┼─────────┼──────────┼─────────┤
-    │ instance-4  │ 6.12ms   │ 52802     │ 0       │ 0        │ 0.656   │
-    │ instance-3  │ 6.95ms   │ 52800     │ 0       │ 0        │ 0.641   │
-    │ instance-2  │ 8.45ms   │ 51374     │ 0       │ 1        │ 0.523   │
-    └─────────────┴──────────┴───────────┴─────────┴──────────┴─────────┘
+    +-------------+----------+-----------+---------+----------+---------+
+    | Instance    | Latency  | Uptime(s) | Lag     | Crashes  | Score   |
+    +-------------+----------+-----------+---------+----------+---------+
+    | instance-4  | 6.12ms   | 52802     | 0       | 0        | 0.656   |
+    | instance-3  | 6.95ms   | 52800     | 0       | 0        | 0.641   |
+    | instance-2  | 8.45ms   | 51374     | 0       | 1        | 0.523   |
+    +-------------+----------+-----------+---------+----------+---------+
     
     Winner: instance-4 (highest score: 0.656)
     
@@ -56,12 +56,12 @@ when the master database crashes.
     Promoting instance-4 to master...
     Replicator user verified on mysql-instance-4
     Successfully promoted mysql-instance-4 to master
-    Reconfiguring instance-2 to replicate from new master mysql-instance-4...
+    Reconfiguring instance-2 to replicate from mysql-instance-4...
     Successfully reconfigured instance-2
-    ✓ instance-2 replication is running
-    Reconfiguring instance-3 to replicate from new master mysql-instance-4...
+    [OK] instance-2 replication is running
+    Reconfiguring instance-3 to replicate from mysql-instance-4...
     Successfully reconfigured instance-3
-    ✓ instance-3 replication is running
+    [OK] instance-3 replication is running
     Failover complete: new master is instance-4
     
     Response: {
@@ -75,25 +75,13 @@ when the master database crashes.
 >>> AFTER FAILOVER - New Topology:
     Master:   mysql-instance-4
     Replicas: mysql-instance-2, mysql-instance-3
-    
-    {
-      "current_master": {
-        "id": "instance-4",
-        "host": "mysql-instance-4"
-      },
-      "current_replicas": [
-        {"id": "instance-2", "host": "mysql-instance-2"},
-        {"id": "instance-3", "host": "mysql-instance-3"}
-      ],
-      "total_replicas": 2
-    }
 
 >>> STEP 4: Verify writes work on new master
-    INSERT INTO products (name, price) VALUES ('After Failover Product', 99.99)
+    INSERT INTO products (name, price) VALUES ('After Failover', 99.99)
     
     Response: {
       "success": true,
-      "message": "Write successful (consistency: STRONG, timestamp: 109)",
+      "message": "Write successful (STRONG, timestamp: 109)",
       "executed_on": "mysql-instance-4",
       "quorum_achieved": true
     }
@@ -102,19 +90,9 @@ when the master database crashes.
    KEY OBSERVATIONS
 ============================================================
 
-✓ Master failure detected when container became unreachable
-✓ SEER elected instance-4 (best latency, zero crashes, longest uptime)
-✓ All remaining replicas automatically reconfigured to new master
-✓ GTID-based replication ensured no data loss (replicas had all transactions)
-✓ Failover completed in ~6 seconds
-✓ Writes immediately successful on new master
-
-============================================================
-   FAILURE HANDLING
-============================================================
-
-• Old master (instance-1) removed from topology
-• New master (instance-4) now accepts writes
-• Binlog replication continues to instance-2 and instance-3
-• When instance-1 recovers, it can be added back as a replica
-
+[OK] Master failure detected when container became unreachable
+[OK] SEER elected instance-4 (best latency, zero crashes)
+[OK] All remaining replicas reconfigured to new master
+[OK] GTID-based replication ensured no data loss
+[OK] Failover completed in ~6 seconds
+[OK] Writes immediately successful on new master

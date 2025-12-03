@@ -414,14 +414,14 @@ Figure~\ref{fig:usecase} shows the use case diagram illustrating the main functi
 
 \begin{figure}[!t]
 \centering
-\begin{tikzpicture}[scale=0.7, transform shape]
+\begin{tikzpicture}[scale=0.5, transform shape]
     % System boundary
     \draw[thick, rounded corners] (-0.5,-5.5) rectangle (7,3.5);
     \node[font=\footnotesize\bfseries] at (3.25,3.2) {Distributed Database System};
     
     % Actor: Client Application
     \node[font=\footnotesize] at (-2,1) {Client};
-    \node[font=\footnotesize] at (-2,0.5) {Application};
+    \node[font=\footnotesize] at (-2,0.5) {App};
     \draw (-2,2) circle (0.3);
     \draw (-2,1.7) -- (-2,1.2);
     \draw (-2.3,1.5) -- (-1.7,1.5);
@@ -547,52 +547,54 @@ CREATE TABLE _metadata (
 
 The master accepts both reads and writes, while replicas are read-only and receive updates via MySQL's native GTID-based binary log replication. When a failover occurs, the coordinator promotes the elected replica by stopping its replication, disabling read-only mode, and reconfiguring remaining replicas to replicate from the new master.
 
-% \subsection{Component Diagram}
+\subsection{Component Diagram}
 
-% Figure~\ref{fig:component} shows the component interactions in our system.
+Figure~\ref{fig:component} shows the component interactions in our system.
 
-% \begin{figure}[!t]
-% \centering
-% \begin{tikzpicture}[node distance=1.2cm, scale=0.75, transform shape]
-%     % Client
-%     \node[component, fill=yellow!20] (client) {Client};
+\begin{figure}[!t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[node distance=1.2cm]
+    % Client
+    \node[component, fill=yellow!20] (client) {Client};
     
-%     % Coordinator
-%     \node[component, below=of client, fill=green!20, text width=2.5cm] (coord) {Coordinator\\(FastAPI)};
+    % Coordinator
+    \node[component, below=of client, fill=green!20, text width=2.5cm] (coord) {Coordinator\\(FastAPI)};
     
-%     % Services row
-%     \node[component, below left=1cm and 1.5cm of coord] (ts1) {Timestamp\\Server 1};
-%     \node[component, right=0.3cm of ts1] (ts2) {Timestamp\\Server 2};
-%     \node[component, right=0.3cm of ts2] (metrics) {Metrics\\Collector};
-%     \node[component, right=0.3cm of metrics] (cabinet) {Cabinet};
-%     \node[component, right=0.3cm of cabinet] (seer) {SEER};
+    % Services row
+    \node[component, below left=1cm and 1.5cm of coord] (ts1) {Timestamp\\Server 1};
+    \node[component, right=0.3cm of ts1] (ts2) {Timestamp\\Server 2};
+    \node[component, right=0.3cm of ts2] (metrics) {Metrics\\Collector};
+    \node[component, right=0.3cm of metrics] (cabinet) {Cabinet};
+    \node[component, right=0.3cm of cabinet] (seer) {SEER};
     
-%     % Databases
-%     \node[database, below=2cm of ts1] (master) {Master};
-%     \node[database, right=0.5cm of master] (r1) {Replica 1};
-%     \node[database, right=0.5cm of r1] (r2) {Replica 2};
-%     \node[database, right=0.5cm of r2] (r3) {Replica 3};
+    % Databases
+    \node[database, below=2cm of ts1] (master) {Master};
+    \node[database, right=0.5cm of master] (r1) {Replica 1};
+    \node[database, right=0.5cm of r1] (r2) {Replica 2};
+    \node[database, right=0.5cm of r2] (r3) {Replica 3};
     
-%     % Arrows
-%     \draw[arrow] (client) -- (coord);
-%     \draw[arrow] (coord) -- (ts1);
-%     \draw[arrow] (coord) -- (ts2);
-%     \draw[arrow] (coord) -- (cabinet);
-%     \draw[arrow] (coord) -- (seer);
-%     \draw[arrow] (cabinet) -- (metrics);
-%     \draw[arrow] (seer) -- (metrics);
-%     \draw[arrow] (coord) -- (master);
-%     \draw[dashedarrow] (coord) -- (r1);
-%     \draw[dashedarrow] (coord) -- (r2);
-%     \draw[dashedarrow] (coord) -- (r3);
-%     \draw[arrow] (metrics) -- (master);
-%     \draw[arrow] (metrics) -- (r1);
-%     \draw[arrow] (metrics) -- (r2);
-%     \draw[arrow] (metrics) -- (r3);
-% \end{tikzpicture}
-% \caption{Component Diagram showing service dependencies.}
-% \label{fig:component}
-% \end{figure}
+    % Arrows
+    \draw[arrow] (client) -- (coord);
+    \draw[arrow] (coord) -- (ts1);
+    \draw[arrow] (coord) -- (ts2);
+    \draw[arrow] (coord) -- (cabinet);
+    \draw[arrow] (coord) -- (seer);
+    \draw[arrow] (cabinet) -- (metrics);
+    \draw[arrow] (seer) -- (metrics);
+    \draw[arrow] (coord) -- (master);
+    \draw[dashedarrow] (coord) -- (r1);
+    \draw[dashedarrow] (coord) -- (r2);
+    \draw[dashedarrow] (coord) -- (r3);
+    \draw[arrow] (metrics) -- (master);
+    \draw[arrow] (metrics) -- (r1);
+    \draw[arrow] (metrics) -- (r2);
+    \draw[arrow] (metrics) -- (r3);
+\end{tikzpicture}%
+}
+\caption{Component Diagram showing service dependencies and communication paths.}
+\label{fig:component}
+\end{figure}
 
 \subsection{Deployment Diagram}
 
@@ -600,7 +602,43 @@ Figure~\ref{fig:deployment} shows the deployment diagram illustrating how our sy
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\linewidth]{images/deploymentdiagram.png}
+\begin{tikzpicture}[scale=0.65, transform shape,
+    node distance=0.8cm,
+    container/.style={rectangle, draw, fill=blue!10, minimum width=2cm, minimum height=0.7cm, font=\scriptsize},
+    db/.style={cylinder, draw, fill=orange!20, shape border rotate=90, aspect=0.25, minimum height=0.7cm, minimum width=1cm, font=\scriptsize},
+    host/.style={rectangle, draw, dashed, fill=gray!5, inner sep=0.3cm},
+    network/.style={rectangle, draw, fill=green!10, minimum width=8cm, minimum height=0.5cm, font=\scriptsize}]
+    
+    % Host machine
+    \node[host, minimum width=10cm, minimum height=6cm] (host) {};
+    \node[above] at (host.north) {\textbf{Host Machine (Docker)}};
+    
+    % Docker network
+    \node[network] (net) at (0,-2.2) {db-network (172.20.0.0/16)};
+    
+    % Coordinator
+    \node[container, fill=red!15] (coord) at (0,1.8) {Coordinator :9000};
+    
+    % Timestamp services
+    \node[container, fill=yellow!20] (ts1) at (-3.5,0.8) {Timestamp-1 :9001};
+    \node[container, fill=yellow!20] (ts2) at (-3.5,0) {Timestamp-2 :9002};
+    
+    % Support services
+    \node[container, fill=purple!15] (metrics) at (3.5,0.8) {Metrics :9003};
+    \node[container, fill=purple!15] (cabinet) at (3.5,0) {Cabinet :9004};
+    \node[container, fill=purple!15] (seer) at (3.5,-0.8) {SEER :9005};
+    
+    % MySQL instances
+    \node[db] (db1) at (-2,-1.2) {MySQL-1 :3306};
+    \node[db] (db2) at (-0.5,-1.2) {MySQL-2 :3307};
+    \node[db] (db3) at (1,-1.2) {MySQL-3 :3308};
+    \node[db] (db4) at (2.5,-1.2) {MySQL-4 :3309};
+    
+    % Labels
+    \node[font=\tiny] at (-2,-0.7) {Master};
+    \node[font=\tiny] at (0.5,-0.7) {Replicas};
+    
+\end{tikzpicture}
 \caption{Deployment Diagram showing Docker container topology and network configuration.}
 \label{fig:deployment}
 \end{figure}
@@ -797,8 +835,36 @@ Figure~\ref{fig:state} shows the possible states of a MySQL replica.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\linewidth]{images/statediagram.png}
-\caption{State Diagram for MySQL Replica Lifecycle.}
+\begin{tikzpicture}[scale=0.75, transform shape,
+    state/.style={rectangle, rounded corners, draw, fill=green!10, minimum width=2cm, minimum height=0.8cm, font=\footnotesize},
+    initial/.style={circle, draw, fill=black, inner sep=2pt},
+    final/.style={circle, draw, double, fill=black!20, inner sep=2pt}]
+    
+    % States
+    \node[initial] (init) at (-4,0) {};
+    \node[state] (stopped) at (-2,0) {Stopped};
+    \node[state] (starting) at (1,0) {Starting};
+    \node[state, fill=blue!15] (healthy) at (4,0) {Healthy};
+    \node[state, fill=yellow!20] (lagging) at (4,-2) {Lagging};
+    \node[state, fill=red!15] (unhealthy) at (1,-2) {Unhealthy};
+    \node[state, fill=orange!20] (promoting) at (-2,-2) {Promoting};
+    \node[state, fill=green!25] (master) at (-2,-4) {Master};
+    
+    % Transitions
+    \draw[->, thick] (init) -- (stopped);
+    \draw[->, thick] (stopped) -- node[above, font=\tiny] {start} (starting);
+    \draw[->, thick] (starting) -- node[above, font=\tiny] {connected} (healthy);
+    \draw[->, thick] (healthy) -- node[right, font=\tiny] {lag > threshold} (lagging);
+    \draw[->, thick] (lagging) -- node[below, font=\tiny] {caught up} (healthy);
+    \draw[->, thick] (lagging) -- node[above, font=\tiny] {timeout} (unhealthy);
+    \draw[->, thick] (healthy) -- node[above, font=\tiny] {conn lost} (unhealthy);
+    \draw[->, thick] (unhealthy) -- node[above, font=\tiny] {reconnect} (starting);
+    \draw[->, thick] (healthy) -- node[left, font=\tiny] {SEER elected} (promoting);
+    \draw[->, thick] (promoting) -- node[left, font=\tiny] {promoted} (master);
+    \draw[->, thick] (unhealthy) -- node[below, font=\tiny] {stop} (stopped);
+    
+\end{tikzpicture}
+\caption{State Diagram for MySQL Replica Lifecycle showing transitions between operational states.}
 \label{fig:state}
 \end{figure}
 
@@ -910,8 +976,45 @@ Figure~\ref{fig:class} shows the key modules and their relationships.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\linewidth]{images/classdiagram.png}
-\caption{Class/Module Diagram showing service relationships.}
+\begin{tikzpicture}[scale=0.6, transform shape,
+    class/.style={rectangle, draw, fill=blue!10, minimum width=2.5cm, font=\scriptsize},
+    classname/.style={rectangle, draw, fill=blue!25, minimum width=2.5cm, font=\scriptsize\bfseries}]
+    
+    % Coordinator
+    \node[classname] (coordname) at (0,3) {Coordinator};
+    \node[class, below=0pt of coordname, text width=2.3cm, align=left] (coordattr) {current\_master\\current\_replicas\\state\_lock};
+    \node[class, below=0pt of coordattr, text width=2.3cm, align=left] (coordmeth) {execute\_query()\\get\_timestamp()\\handle\_failover()};
+    
+    % Cabinet
+    \node[classname] (cabname) at (-4,0) {CabinetService};
+    \node[class, below=0pt of cabname, text width=2.3cm, align=left] (cabattr) {metrics\_url\\quorum\_size};
+    \node[class, below=0pt of cabattr, text width=2.3cm, align=left] (cabmeth) {select\_quorum()\\calculate\_weights()};
+    
+    % SEER
+    \node[classname] (seername) at (4,0) {SEERService};
+    \node[class, below=0pt of seername, text width=2.3cm, align=left] (seerattr) {metrics\_url\\weights};
+    \node[class, below=0pt of seerattr, text width=2.3cm, align=left] (seermeth) {elect\_leader()\\compute\_score()};
+    
+    % Timestamp
+    \node[classname] (tsname) at (-4,3) {TimestampService};
+    \node[class, below=0pt of tsname, text width=2.3cm, align=left] (tsattr) {counter\\server\_id};
+    \node[class, below=0pt of tsattr, text width=2.3cm, align=left] (tsmeth) {get\_timestamp()\\reset()};
+    
+    % Metrics
+    \node[classname] (metname) at (4,3) {MetricsCollector};
+    \node[class, below=0pt of metname, text width=2.3cm, align=left] (metattr) {replica\_metrics\\poll\_interval};
+    \node[class, below=0pt of metattr, text width=2.3cm, align=left] (metmeth) {collect\_metrics()\\get\_health()};
+    
+    % Relationships
+    \draw[->, thick] (coordmeth.west) -- ++(-0.5,0) |- (tsmeth.east) node[midway, above, font=\tiny] {};
+    \draw[->, thick] (coordmeth.south) -- ++(0,-0.3) -| (cabmeth.north);
+    \draw[->, thick] (coordmeth.south) -- ++(0,-0.3) -| (seermeth.north);
+    \draw[->, thick] (coordattr.east) -- ++(0.5,0) |- (metmeth.west);
+    \draw[dashed, ->] (cabattr.south) -- ++(0,-0.8) -| (metmeth.south) node[near start, right, font=\tiny] {fetches};
+    \draw[dashed, ->] (seerattr.south) -- ++(0,-0.5) -| ([xshift=0.3cm]metmeth.south) node[near start, left, font=\tiny] {fetches};
+    
+\end{tikzpicture}
+\caption{Class/Module Diagram showing service modules and their relationships.}
 \label{fig:class}
 \end{figure}
 
@@ -921,8 +1024,38 @@ Figure~\ref{fig:object} shows an object diagram representing a snapshot of the s
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=\linewidth]{images/objectdiagram.png}
-\caption{Object Diagram showing runtime instances during a write operation.}
+\begin{tikzpicture}[scale=0.65, transform shape,
+    object/.style={rectangle, draw, fill=yellow!15, minimum width=2.8cm, font=\scriptsize},
+    objectname/.style={rectangle, draw, fill=yellow!30, minimum width=2.8cm, font=\scriptsize}]
+    
+    % Coordinator instance
+    \node[objectname] (coord) at (0,2.5) {\underline{coord:Coordinator}};
+    \node[object, below=0pt of coord, text width=2.6cm, align=left] (coordval) {master=instance-1\\replicas=[2,3,4]\\mode=STRONG};
+    
+    % Request
+    \node[objectname] (req) at (-4,2.5) {\underline{req:QueryRequest}};
+    \node[object, below=0pt of req, text width=2.6cm, align=left] (reqval) {query="INSERT..."\\consistency=STRONG\\timestamp=107};
+    
+    % MySQL Master
+    \node[objectname] (db1) at (0,-0.5) {\underline{db1:MySQLInstance}};
+    \node[object, below=0pt of db1, text width=2.6cm, align=left] (db1val) {host=instance-1\\role=MASTER\\binlog\_pos=1234};
+    
+    % Replica
+    \node[objectname] (db2) at (4,-0.5) {\underline{db2:MySQLInstance}};
+    \node[object, below=0pt of db2, text width=2.6cm, align=left] (db2val) {host=instance-2\\role=REPLICA\\lag=0};
+    
+    % Quorum result
+    \node[objectname] (quorum) at (4,2.5) {\underline{q:QuorumResult}};
+    \node[object, below=0pt of quorum, text width=2.6cm, align=left] (quorumval) {replicas=[2,3]\\size=2\\achieved=true};
+    
+    % Links
+    \draw[->, thick] (reqval.east) -- (coordval.west) node[midway, above, font=\tiny] {processes};
+    \draw[->, thick] (coordval.south) -- (db1.north) node[midway, right, font=\tiny] {writes to};
+    \draw[->, thick] (coordval.east) -- (quorum.west) node[midway, above, font=\tiny] {awaits};
+    \draw[dashed, ->] (db1val.east) -- (db2val.west) node[midway, above, font=\tiny] {replicates};
+    
+\end{tikzpicture}
+\caption{Object Diagram showing runtime instances during a write operation with timestamp 107.}
 \label{fig:object}
 \end{figure}
 
@@ -932,7 +1065,48 @@ Figure~\ref{fig:activity} shows the activity diagram for a write operation, illu
 
 \begin{figure}[!t]
 \centering
-\includegraphics[width=\linewidth]{images/activitydiagram.png}
+\begin{tikzpicture}[scale=0.6, transform shape,
+    start/.style={circle, draw, fill=black, inner sep=3pt},
+    stop/.style={circle, draw, double, fill=black, inner sep=3pt},
+    action/.style={rectangle, rounded corners, draw, fill=blue!15, minimum width=2cm, minimum height=0.6cm, font=\scriptsize},
+    decision/.style={diamond, draw, fill=yellow!20, minimum width=1cm, minimum height=1cm, font=\scriptsize, inner sep=1pt},
+    fork/.style={rectangle, draw, fill=black, minimum width=2cm, minimum height=3pt}]
+    
+    \node[start] (start) at (0,0) {};
+    \node[action] (receive) at (0,-1) {Receive Query};
+    \node[decision] (iswrite) at (0,-2.5) {Write?};
+    
+    % Write path
+    \node[action] (getts) at (-2.5,-4) {Get Timestamp};
+    \node[action] (writemaster) at (-2.5,-5.2) {Write to Master};
+    \node[decision] (strong) at (-2.5,-6.7) {Strong?};
+    \node[action] (getquorum) at (-2.5,-8.2) {Get Quorum};
+    \node[action] (waitreplica) at (-2.5,-9.4) {Wait Replicas};
+    
+    % Read path  
+    \node[action] (selectreplica) at (2.5,-4) {Select Replica};
+    \node[action] (readdata) at (2.5,-5.2) {Read Data};
+    
+    % Merge
+    \node[action] (respond) at (0,-11) {Return Response};
+    \node[stop] (stop) at (0,-12.2) {};
+    
+    % Connections
+    \draw[->, thick] (start) -- (receive);
+    \draw[->, thick] (receive) -- (iswrite);
+    \draw[->, thick] (iswrite) -- node[left, font=\tiny] {yes} (getts);
+    \draw[->, thick] (iswrite) -- node[above, font=\tiny] {no} (selectreplica);
+    \draw[->, thick] (getts) -- (writemaster);
+    \draw[->, thick] (writemaster) -- (strong);
+    \draw[->, thick] (strong) -- node[left, font=\tiny] {yes} (getquorum);
+    \draw[->, thick] (strong.east) -- ++(1,0) |- (respond.west) node[near start, above, font=\tiny] {no};
+    \draw[->, thick] (getquorum) -- (waitreplica);
+    \draw[->, thick] (waitreplica) |- (respond);
+    \draw[->, thick] (selectreplica) -- (readdata);
+    \draw[->, thick] (readdata) |- (respond);
+    \draw[->, thick] (respond) -- (stop);
+    
+\end{tikzpicture}
 \caption{Activity Diagram showing the flow of a query through the system.}
 \label{fig:activity}
 \end{figure}
@@ -994,7 +1168,7 @@ SELECT * FROM users WHERE name = 'Alice';
 
 \begin{figure}[!t]
 \centering
-\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, linerange={1-50}]{images/logs/scenario1_success.txt}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-50}]{images/logs/scenario1_success.txt}
 \caption{Backend logs of successful Strong consistency write operation showing timestamp service, Cabinet quorum selection, and replica catch-up verification.}
 \label{fig:snapshot-success}
 \end{figure}
@@ -1044,7 +1218,7 @@ curl -X POST http://localhost:9000/admin/start-instance \
 
 \begin{figure}[!t]
 \centering
-\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, linerange={1-55}]{images/logs/scenario2_master_failure.txt}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-55}]{images/logs/scenario2_master_failure.txt}
 \caption{Backend logs of master failure scenario showing SEER election scoring, leader promotion, and replica reconfiguration.}
 \label{fig:snapshot-master-failure}
 \end{figure}
@@ -1083,7 +1257,7 @@ curl -X POST http://localhost:9000/admin/start-instance \
 
 \begin{figure}[!t]
 \centering
-\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, linerange={1-55}]{images/logs/scenario3_replica_failure.txt}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-55}]{images/logs/scenario3_replica_failure.txt}
 \caption{Backend logs of replica failure scenario showing Cabinet excluding unhealthy replicas and quorum still achieved.}
 \label{fig:snapshot-replica-failure}
 \end{figure}
@@ -1123,7 +1297,7 @@ curl -X POST http://localhost:9000/admin/start-instance \
 
 \begin{figure}[!t]
 \centering
-\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, linerange={1-55}]{images/logs/scenario4_timestamp_failure.txt}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-55}]{images/logs/scenario4_timestamp_failure.txt}
 \caption{Backend logs of timestamp server failure showing automatic failover and continued writes with even timestamps from backup server.}
 \label{fig:snapshot-timestamp-failure}
 \end{figure}
