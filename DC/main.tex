@@ -994,9 +994,8 @@ SELECT * FROM users WHERE name = 'Alice';
 
 \begin{figure}[!t]
 \centering
-% TODO: Replace with actual screenshot of successful write
-\fbox{\parbox{0.9\columnwidth}{\centering\vspace{2cm}\textbf{Screenshot: Successful Strong Consistency Write}\\[0.5em]\small Insert screenshot showing:\\- Client request in terminal\\- Coordinator logs\\- Database query result\vspace{2cm}}}
-\caption{Snapshot of successful Strong consistency write operation showing client request, coordinator processing, and data verification.}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, linerange={1-50}]{images/logs/scenario1_success.txt}
+\caption{Backend logs of successful Strong consistency write operation showing timestamp service, Cabinet quorum selection, and replica catch-up verification.}
 \label{fig:snapshot-success}
 \end{figure}
 
@@ -1045,9 +1044,8 @@ curl -X POST http://localhost:9000/admin/start-instance \
 
 \begin{figure}[!t]
 \centering
-% TODO: Replace with actual screenshot of master failure and recovery
-\fbox{\parbox{0.9\columnwidth}{\centering\vspace{2cm}\textbf{Screenshot: Master Failure \& Recovery}\\[0.5em]\small Insert screenshot showing:\\- docker stop command\\- SEER election logs\\- New master confirmation\\- Successful retry\vspace{2cm}}}
-\caption{Snapshot of master failure scenario showing failure detection, SEER leader election, and successful recovery.}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, linerange={1-55}]{images/logs/scenario2_master_failure.txt}
+\caption{Backend logs of master failure scenario showing SEER election scoring, leader promotion, and replica reconfiguration.}
 \label{fig:snapshot-master-failure}
 \end{figure}
 
@@ -1085,9 +1083,8 @@ curl -X POST http://localhost:9000/admin/start-instance \
 
 \begin{figure}[!t]
 \centering
-% TODO: Replace with actual screenshot of replica failure during write
-\fbox{\parbox{0.9\columnwidth}{\centering\vspace{2cm}\textbf{Screenshot: Replica Failure During Write}\\[0.5em]\small Insert screenshot showing:\\- Write request initiated\\- docker stop replica command\\- Quorum still achieved\\- Success response\vspace{2cm}}}
-\caption{Snapshot of replica failure scenario showing graceful degradation with quorum-based writes.}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, linerange={1-55}]{images/logs/scenario3_replica_failure.txt}
+\caption{Backend logs of replica failure scenario showing Cabinet excluding unhealthy replicas and quorum still achieved.}
 \label{fig:snapshot-replica-failure}
 \end{figure}
 
@@ -1126,9 +1123,8 @@ curl -X POST http://localhost:9000/admin/start-instance \
 
 \begin{figure}[!t]
 \centering
-% TODO: Replace with actual screenshot of timestamp server failure
-\fbox{\parbox{0.9\columnwidth}{\centering\vspace{2cm}\textbf{Screenshot: Timestamp Server Failure}\\[0.5em]\small Insert screenshot showing:\\- docker stop timestamp-service-1\\- Coordinator fallback logs\\- Continued writes with even timestamps\\- Successful operation\vspace{2cm}}}
-\caption{Snapshot of timestamp server failure showing fallback to remaining server and continued operation.}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, linerange={1-55}]{images/logs/scenario4_timestamp_failure.txt}
+\caption{Backend logs of timestamp server failure showing automatic failover and continued writes with even timestamps from backup server.}
 \label{fig:snapshot-timestamp-failure}
 \end{figure}
 

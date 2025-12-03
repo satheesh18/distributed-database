@@ -150,25 +150,34 @@ async def get_timestamp() -> int:
     """
     Get a globally ordered timestamp from one of the timestamp services.
     
-    Load balances between the two timestamp services.
+    Load balances between the two timestamp services with automatic failover.
+    If the primary service fails, falls back to the other service.
     
     Returns:
         Timestamp value
         
     Raises:
-        HTTPException: If timestamp cannot be obtained
+        HTTPException: If timestamp cannot be obtained from any service
     """
-    # Randomly select a timestamp service for load balancing
-    service_url = random.choice(TIMESTAMP_SERVICES)
+    # Shuffle services for load balancing
+    services = TIMESTAMP_SERVICES.copy()
+    random.shuffle(services)
     
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{service_url}/timestamp", timeout=5.0)
-            response.raise_for_status()
-            data = response.json()
-            return data["timestamp"]
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Failed to get timestamp: {str(e)}")
+    last_error = None
+    for service_url in services:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{service_url}/timestamp", timeout=2.0)
+                response.raise_for_status()
+                data = response.json()
+                print(f"Got timestamp {data['timestamp']} from {service_url}")
+                return data["timestamp"]
+        except Exception as e:
+            print(f"Timestamp service {service_url} failed: {e}, trying fallback...")
+            last_error = e
+            continue
+    
+    raise HTTPException(status_code=503, detail=f"All timestamp services failed: {str(last_error)}")
 
 
 def execute_query_on_host(host: str, query: str, timestamp: Optional[int] = None) -> Dict:

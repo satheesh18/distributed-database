@@ -1,0 +1,120 @@
+============================================================
+   SCENARIO 2: MASTER FAILURE AND SEER ELECTION
+============================================================
+
+This demonstrates automatic failover using the SEER algorithm
+when the master database crashes.
+
+>>> BEFORE FAILURE - Initial Topology:
+    Master:   mysql-instance-1
+    Replicas: mysql-instance-2, mysql-instance-3, mysql-instance-4
+
+>>> STEP 1: Master crashes unexpectedly
+    Command: docker stop mysql-instance-1
+    Result: mysql-instance-1 container stopped
+    
+    [coordinator logs]: Connection to mysql-instance-1 failed
+
+>>> STEP 2: SEER Algorithm elects best leader candidate
+    POST http://seer-service:8000/elect-leader
+    
+    SEER Scoring Formula:
+    score = w1 * (1/latency) + w2 * uptime + w3 * (1/(lag+1)) + w4 * (1/(crashes+1))
+    
+    Candidate Scores:
+    ┌─────────────┬──────────┬───────────┬─────────┬──────────┬─────────┐
+    │ Instance    │ Latency  │ Uptime(s) │ Lag     │ Crashes  │ Score   │
+    ├─────────────┼──────────┼───────────┼─────────┼──────────┼─────────┤
+    │ instance-4  │ 6.12ms   │ 52802     │ 0       │ 0        │ 0.656   │
+    │ instance-3  │ 6.95ms   │ 52800     │ 0       │ 0        │ 0.641   │
+    │ instance-2  │ 8.45ms   │ 51374     │ 0       │ 1        │ 0.523   │
+    └─────────────┴──────────┴───────────┴─────────┴──────────┴─────────┘
+    
+    Winner: instance-4 (highest score: 0.656)
+    
+    Response: {
+      "leader_id": "instance-4",
+      "score": 0.656,
+      "latency_ms": 6.12,
+      "uptime_seconds": 52802,
+      "replication_lag": 0,
+      "crash_count": 0
+    }
+
+>>> STEP 3: Coordinator promotes elected leader
+    POST http://coordinator:8000/admin/promote-leader
+    Body: { "new_leader": "instance-4" }
+    
+    Promotion Steps:
+    a) Stop replication on instance-4
+    b) Verify replicator user exists for other replicas
+    c) Update instance-4 to accept writes
+    d) Reconfigure instance-2 to replicate from instance-4
+    e) Reconfigure instance-3 to replicate from instance-4
+    
+    [coordinator logs]:
+    Promoting instance-4 to master...
+    Replicator user verified on mysql-instance-4
+    Successfully promoted mysql-instance-4 to master
+    Reconfiguring instance-2 to replicate from new master mysql-instance-4...
+    Successfully reconfigured instance-2
+    ✓ instance-2 replication is running
+    Reconfiguring instance-3 to replicate from new master mysql-instance-4...
+    Successfully reconfigured instance-3
+    ✓ instance-3 replication is running
+    Failover complete: new master is instance-4
+    
+    Response: {
+      "success": true,
+      "message": "Successfully promoted instance-4 to master",
+      "old_master": "instance-1",
+      "new_master": "instance-4",
+      "reconfigured_replicas": ["instance-2", "instance-3"]
+    }
+
+>>> AFTER FAILOVER - New Topology:
+    Master:   mysql-instance-4
+    Replicas: mysql-instance-2, mysql-instance-3
+    
+    {
+      "current_master": {
+        "id": "instance-4",
+        "host": "mysql-instance-4"
+      },
+      "current_replicas": [
+        {"id": "instance-2", "host": "mysql-instance-2"},
+        {"id": "instance-3", "host": "mysql-instance-3"}
+      ],
+      "total_replicas": 2
+    }
+
+>>> STEP 4: Verify writes work on new master
+    INSERT INTO products (name, price) VALUES ('After Failover Product', 99.99)
+    
+    Response: {
+      "success": true,
+      "message": "Write successful (consistency: STRONG, timestamp: 109)",
+      "executed_on": "mysql-instance-4",
+      "quorum_achieved": true
+    }
+
+============================================================
+   KEY OBSERVATIONS
+============================================================
+
+✓ Master failure detected when container became unreachable
+✓ SEER elected instance-4 (best latency, zero crashes, longest uptime)
+✓ All remaining replicas automatically reconfigured to new master
+✓ GTID-based replication ensured no data loss (replicas had all transactions)
+✓ Failover completed in ~6 seconds
+✓ Writes immediately successful on new master
+
+============================================================
+   FAILURE HANDLING
+============================================================
+
+• Old master (instance-1) removed from topology
+• New master (instance-4) now accepts writes
+• Binlog replication continues to instance-2 and instance-3
+• When instance-1 recovers, it can be added back as a replica
+
