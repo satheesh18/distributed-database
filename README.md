@@ -52,6 +52,41 @@ npm run dev
 
 Open http://localhost:5173 in your browser.
 
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Client / Frontend                         │
+└────────────────────────┬────────────────────────────────────┘
+                         │ HTTP Requests
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Coordinator (FastAPI - Port 9000)              │
+│  • Query parsing & routing                                  │
+│  • Timestamp coordination                                   │
+│  • Quorum-based replication verification                    │
+│  • Failover orchestration                                   │
+└──┬────┬────┬────┬────┬────┬────┬────┬────┬────────────────┘
+   │    │    │    │    │    │    │    │    │
+   ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼
+┌─────┐┌─────┐┌─────┐┌─────┐┌─────┐┌─────┐┌─────┐┌─────┐┌─────┐
+│MySQL││MySQL││MySQL││MySQL││TS-1 ││TS-2 ││Metr.││Cab. ││SEER │
+│Mstr ││Rep2 ││Rep3 ││Rep4 ││Odd  ││Even ││Coll.││     ││     │
+│:3306││:3307││:3308││:3309││:9001││:9002││:9003││:9004││:9005│
+└─────┘└─────┘└─────┘└─────┘└─────┘└─────┘└─────┘└─────┘└─────┘
+   │       │       │       │
+   └───────┴───────┴───────┘
+   MySQL Binlog Replication
+```
+
+**Components:**
+- **MySQL Instances**: 1 master + 3 replicas with binlog replication
+- **Timestamp Services**: Odd/even assignment for global ordering
+- **Metrics Collector**: Monitors latency, lag, uptime, crashes
+- **Cabinet Service**: Adaptive quorum selection based on performance
+- **SEER Service**: Performance-aware leader election
+- **Coordinator**: Main API gateway orchestrating all operations
+
 ## Features
 
 ### Backend
@@ -60,7 +95,7 @@ Open http://localhost:5173 in your browser.
 - ✅ **Performance-Aware Leader Election**: SEER algorithm for intelligent failover
 - ✅ **Strong Consistency**: Quorum-based writes (majority confirmation)
 - ✅ **Intelligent Read Routing**: Routes to best replica based on latency/lag
-- ✅ **Custom Replication**: Manual replication logic (no binlog)
+- ✅ **Binlog-Based Replication**: MySQL native binary log replication with GTID
 
 ### Frontend Dashboard
 - ✅ **Service Status Monitoring**: Real-time health checks for all services
@@ -117,12 +152,12 @@ Open http://localhost:5173 in your browser.
 
 | Service | Port | Endpoints |
 |---------|------|-----------|
-| Coordinator | 8000 | `/query`, `/status`, `/health` |
-| Timestamp 1 | 8001 | `/timestamp`, `/health` |
-| Timestamp 2 | 8002 | `/timestamp`, `/health` |
-| Metrics | 8003 | `/metrics`, `/metrics/{id}`, `/health` |
-| Cabinet | 8004 | `/select-quorum`, `/health` |
-| SEER | 8005 | `/elect-leader`, `/health` |
+| Coordinator | 9000 | `/query`, `/status`, `/health` |
+| Timestamp 1 | 9001 | `/timestamp`, `/health` |
+| Timestamp 2 | 9002 | `/timestamp`, `/health` |
+| Metrics | 9003 | `/metrics`, `/metrics/{id}`, `/health` |
+| Cabinet | 9004 | `/select-quorum`, `/health` |
+| SEER | 9005 | `/elect-leader`, `/health` |
 
 ## Technology Stack
 

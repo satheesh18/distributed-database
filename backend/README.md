@@ -42,7 +42,7 @@ This system provides:
    - Single entry point for all SQL queries
    - Routes writes to master with quorum-based replication
    - Routes reads to best available replica (lowest latency, minimal lag)
-   - Coordinates timestamp assignment and **manual replication** (no binlog)
+   - Coordinates timestamp assignment and **binlog-based replication** with GTID
 
 3. **Timestamp Service** (2 containers)
    - Server 1: Assigns odd numbers (1, 3, 5, ...)
@@ -261,12 +261,12 @@ curl -X POST http://localhost:9005/elect-leader \
 
 | Service | Port | Endpoints |
 |---------|------|-----------|
-| Coordinator | 8000 | `/query`, `/status`, `/health` |
-| Timestamp 1 | 8001 | `/timestamp`, `/health` |
-| Timestamp 2 | 8002 | `/timestamp`, `/health` |
-| Metrics | 8003 | `/metrics`, `/metrics/{id}`, `/health` |
-| Cabinet | 8004 | `/select-quorum`, `/health` |
-| SEER | 8005 | `/elect-leader`, `/health` |
+| Coordinator | 9000 | `/query`, `/status`, `/health` |
+| Timestamp 1 | 9001 | `/timestamp`, `/health` |
+| Timestamp 2 | 9002 | `/timestamp`, `/health` |
+| Metrics | 9003 | `/metrics`, `/metrics/{id}`, `/health` |
+| Cabinet | 9004 | `/select-quorum`, `/health` |
+| SEER | 9005 | `/elect-leader`, `/health` |
 
 ## Stopping the System
 
@@ -338,7 +338,7 @@ backend/
 
 ## Implementation Notes
 
-- **Custom Replication**: The coordinator (logical layer) manually replicates writes to replicas - we do NOT use MySQL binlog. This gives us full control over replication logic and timestamp ordering.
+- **Binlog-Based Replication**: MySQL native binary log replication with GTID automatically propagates writes from master to replicas. The coordinator verifies quorum achievement by checking replica timestamps.
 - **Intelligent Read Routing**: Reads are routed to the best available replica based on latency and replication lag, reducing load on the master and improving read performance.
 - **Strong Consistency**: Achieved through quorum-based writes (majority of replicas must confirm)
 - **Simplified Algorithms**: Core concepts implemented for educational purposes

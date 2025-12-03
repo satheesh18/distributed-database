@@ -38,11 +38,11 @@ The system consists of 10 Docker containers:
 **Test Results**:
 ```bash
 # Server 1 (odd)
-curl http://localhost:8001/timestamp
+curl http://localhost:9001/timestamp
 {"timestamp":3,"server_id":1}
 
 # Server 2 (even)
-curl http://localhost:8002/timestamp
+curl http://localhost:9002/timestamp
 {"timestamp":4,"server_id":2}
 ```
 
@@ -168,7 +168,7 @@ Response:
 
 **Test Results**:
 ```bash
-curl http://localhost:8003/metrics
+curl http://localhost:9003/metrics
 
 Response:
 {
@@ -220,7 +220,7 @@ quorum_size = ⌈(total_replicas + 1) / 2⌉ = 2
 
 **Test Results**:
 ```bash
-curl -X POST http://localhost:8004/select-quorum \
+curl -X POST http://localhost:9004/select-quorum \
   -H "Content-Type: application/json" \
   -d '{"operation": "write"}'
 
@@ -257,7 +257,7 @@ total_score = latency_score + stability_score + lag_score
 
 **Test Results**:
 ```bash
-curl -X POST http://localhost:8005/elect-leader \
+curl -X POST http://localhost:9005/elect-leader \
   -H "Content-Type: application/json" \
   -d '{}'
 
@@ -343,10 +343,10 @@ timestamp-service-2   Up (healthy)
 - Automatic leader election on master failure
 - Minimizes disruption and downtime
 
-### ✅ Custom Replication
-- No reliance on MySQL binlog
-- Full control over replication logic
-- Timestamp-based ordering
+### ✅ Binlog-Based Replication
+- MySQL native binary log replication with GTID
+- Automatic data propagation from master to replicas
+- Timestamp-based ordering for consistency verification
 
 ## Code Quality
 
