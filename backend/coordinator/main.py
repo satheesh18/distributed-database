@@ -421,12 +421,13 @@ async def promote_replica_to_master(replica_container: str) -> bool:
         print(f"Promoting {replica_container} to master...")
         
         # SQL commands to promote replica to master
+        # NOTE: We do NOT use RESET MASTER as it clears GTID history
+        # which breaks replication for other replicas
         promote_sql = """
             STOP SLAVE;
             RESET SLAVE ALL;
             SET GLOBAL read_only = OFF;
             SET GLOBAL super_read_only = OFF;
-            RESET MASTER;
         """
         
         # Execute directly using docker exec
@@ -440,6 +441,25 @@ async def promote_replica_to_master(replica_container: str) -> bool:
         if result.returncode != 0:
             print(f"Failed to promote replica: {result.stderr}")
             return False
+        
+        # Ensure replicator user exists with correct permissions on new master
+        # This is needed so other replicas can connect
+        ensure_replicator_sql = """
+            CREATE USER IF NOT EXISTS 'replicator'@'%' IDENTIFIED WITH mysql_native_password BY 'replicator_password';
+            GRANT REPLICATION SLAVE ON *.* TO 'replicator'@'%';
+            GRANT SELECT ON testdb.* TO 'replicator'@'%';
+            FLUSH PRIVILEGES;
+        """
+        result = subprocess.run(
+            ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", ensure_replicator_sql],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        if result.returncode != 0:
+            print(f"Warning: Could not ensure replicator user: {result.stderr}")
+        else:
+            print(f"Replicator user verified on {replica_container}")
         
         print(f"Successfully promoted {replica_container} to master")
         return True
@@ -919,122 +939,6 @@ async def stop_master():
             "error": str(e)
         }
 
-class FailoverRequest(BaseModel):
-    new_leader: Optional[str] = None
-
-
-@app.post("/admin/trigger-failover")
-async def trigger_failover(request: FailoverRequest):
-    """
-    Trigger a graceful failover to a specific replica (or elect one).
-    This does NOT stop the old master container, but demotes it to a replica.
-    """
-    global current_master, current_replicas
-    
-    try:
-        target_replica = None
-        
-        with state_lock:
-            # If new_leader provided, find it
-            if request.new_leader:
-                target_replica = next((r for r in current_replicas if r["id"] == request.new_leader), None)
-                if not target_replica:
-                     return {
-                        "success": False,
-                        "message": f"Target replica {request.new_leader} not found",
-                        "error": "Replica not found"
-                    }
-            # Otherwise pick the first one (or we could call SEER here)
-            elif current_replicas:
-                target_replica = current_replicas[0]
-            else:
-                return {
-                    "success": False,
-                    "message": "No replicas available for failover",
-                    "error": "No replicas found"
-                }
-            
-            old_master_container = current_master["container"]
-            old_master_id = current_master["id"]
-            old_master_host = current_master["host"]
-            new_master_container = target_replica["container"]
-            new_master_host = target_replica["host"]
-            new_master_id = target_replica["id"]
-            # Get list of other replicas that need to be reconfigured
-            other_replicas = [r for r in current_replicas if r["id"] != new_master_id]
-
-        print(f"Triggering graceful failover from {old_master_id} to {new_master_id}...")
-
-        # Step 1: Promote new master first
-        promotion_success = await promote_replica_to_master(new_master_container)
-        if not promotion_success:
-             return {
-                "success": False,
-                "message": "Failed to promote new master",
-                "error": "Promotion failed"
-            }
-            
-        # Step 2: Demote old master to replica of new master
-        demotion_success = await demote_master_to_replica(old_master_container, new_master_host)
-        if not demotion_success:
-             # This is bad, we have two masters or old master is in weird state.
-             # But new master is active, so we can proceed with state update.
-             print("Warning: Failed to demote old master, but new master is promoted.")
-        
-        # Step 3: Reconfigure ALL other replicas to point to new master
-        # This is critical for subsequent failovers to work
-        for replica in other_replicas:
-            print(f"Reconfiguring {replica['id']} to replicate from new master {new_master_host}...")
-            try:
-                reconfigure_sql = f"""
-                    STOP SLAVE;
-                    RESET SLAVE ALL;
-                    CHANGE MASTER TO
-                        MASTER_HOST='{new_master_host}',
-                        MASTER_USER='replicator',
-                        MASTER_PASSWORD='replicator_password',
-                        MASTER_AUTO_POSITION=1,
-                        GET_MASTER_PUBLIC_KEY=1;
-                    START SLAVE;
-                """
-                result = subprocess.run(
-                    ["docker", "exec", replica["container"], "mysql", "-u", "root", "-prootpass", "-e", reconfigure_sql],
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
-                if result.returncode != 0:
-                    print(f"Warning: Failed to reconfigure {replica['id']}: {result.stderr}")
-                else:
-                    print(f"Successfully reconfigured {replica['id']}")
-            except Exception as e:
-                print(f"Warning: Error reconfiguring {replica['id']}: {e}")
-        
-        # Step 4: Update global state
-        with state_lock:
-            old_master_obj = current_master.copy()
-            current_master = target_replica.copy()
-            
-            # Update replicas list: remove new master, add old master
-            current_replicas = [r.copy() for r in current_replicas if r["id"] != new_master_id]
-            current_replicas.append(old_master_obj)
-            
-        return {
-            "success": True,
-            "message": f"Graceful failover complete. New master: {new_master_id}",
-            "old_master": old_master_id,
-            "new_master": new_master_id,
-            "new_leader_id": new_master_id
-        }
-
-    except Exception as e:
-        return {
-            "success": False,
-            "message": "Graceful failover failed",
-            "error": str(e)
-        }
-
-
 @app.post("/admin/restart-old-master")
 async def restart_old_master():
     """
@@ -1256,24 +1160,10 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
         
         await asyncio.sleep(1)
         
-        # Step 2: Reset binary log (important for clean state)
-        print("Resetting binary log...")
-        reset_sql = "RESET MASTER;"
-        result = subprocess.run(
-            ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", reset_sql],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
+        # NOTE: We do NOT use RESET MASTER here as it clears GTID history
+        # which can cause issues with replication in a GTID-based setup
         
-        if result.returncode != 0:
-            print(f"Warning: Could not reset master: {result.stderr}")
-        else:
-            print("Binary log reset")
-        
-        await asyncio.sleep(1)
-        
-        # Step 3: Set read-only mode
+        # Step 2: Set read-only mode
         print("Setting read-only mode...")
         readonly_sql = "SET GLOBAL read_only = ON; SET GLOBAL super_read_only = ON;"
         result = subprocess.run(
@@ -1290,7 +1180,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
         print("Read-only mode set")
         await asyncio.sleep(1)
         
-        # Step 4: Configure replication (using CHANGE REPLICATION SOURCE for MySQL 8.0.23+)
+        # Step 3: Configure replication (using CHANGE REPLICATION SOURCE for MySQL 8.0.23+)
         print("Configuring replication source...")
         change_master_sql = f"""
             CHANGE REPLICATION SOURCE TO
@@ -1643,6 +1533,156 @@ async def stop_master_only(request: dict):
             "message": "Failed to stop master",
             "error": str(e)
         }
+
+
+@app.post("/admin/promote-leader")
+async def promote_leader(request: dict):
+    """
+    Promote a specific replica to master and reconfigure all other replicas.
+    Called after SEER election when the old master has been stopped.
+    
+    This endpoint:
+    1. Promotes the elected replica to master
+    2. Reconfigures all other replicas to point to the new master
+    3. Updates the coordinator's global state
+    """
+    global current_master, current_replicas
+    
+    new_leader_id = request.get("new_leader")
+    if not new_leader_id:
+        return {
+            "success": False,
+            "message": "new_leader is required",
+            "error": "Missing new_leader parameter"
+        }
+    
+    try:
+        with state_lock:
+            # Find the replica to promote
+            target_replica = next((r for r in current_replicas if r["id"] == new_leader_id), None)
+            if not target_replica:
+                return {
+                    "success": False,
+                    "message": f"Replica {new_leader_id} not found in current replicas",
+                    "error": "Replica not found"
+                }
+            
+            old_master_id = current_master["id"]
+            new_master_container = target_replica["container"]
+            new_master_host = target_replica["host"]
+            # Get list of other replicas that need to be reconfigured
+            other_replicas = [r for r in current_replicas if r["id"] != new_leader_id]
+        
+        print(f"Promoting {new_leader_id} to master...")
+        
+        # Step 1: Promote the elected replica to master
+        promotion_success = await promote_replica_to_master(new_master_container)
+        if not promotion_success:
+            return {
+                "success": False,
+                "message": "Failed to promote replica to master",
+                "error": "Promotion failed"
+            }
+        
+        # Give the new master a moment to be fully ready
+        await asyncio.sleep(2)
+        
+        # Step 2: Reconfigure ALL other replicas to point to new master
+        # This is critical for replication to work after failover
+        for replica in other_replicas:
+            print(f"Reconfiguring {replica['id']} to replicate from new master {new_master_host}...")
+            try:
+                # First, stop replication and clear old master info
+                # RESET SLAVE ALL is needed to clear the old master connection info
+                # but does NOT affect GTID_EXECUTED, so GTID replication will still work
+                stop_sql = "STOP SLAVE; RESET SLAVE ALL;"
+                result = subprocess.run(
+                    ["docker", "exec", replica["container"], "mysql", "-u", "root", "-prootpass", "-e", stop_sql],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode != 0:
+                    print(f"Warning: Failed to stop slave on {replica['id']}: {result.stderr}")
+                
+                # Now configure to replicate from new master
+                # MASTER_AUTO_POSITION=1 uses GTID to automatically find the right position
+                change_master_sql = f"""
+                    CHANGE MASTER TO
+                        MASTER_HOST='{new_master_host}',
+                        MASTER_USER='replicator',
+                        MASTER_PASSWORD='replicator_password',
+                        MASTER_AUTO_POSITION=1,
+                        GET_MASTER_PUBLIC_KEY=1;
+                """
+                result = subprocess.run(
+                    ["docker", "exec", replica["container"], "mysql", "-u", "root", "-prootpass", "-e", change_master_sql],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode != 0:
+                    print(f"Warning: Failed to change master on {replica['id']}: {result.stderr}")
+                
+                # Start replication
+                result = subprocess.run(
+                    ["docker", "exec", replica["container"], "mysql", "-u", "root", "-prootpass", "-e", "START SLAVE;"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode != 0:
+                    print(f"Warning: Failed to start slave on {replica['id']}: {result.stderr}")
+                else:
+                    print(f"Successfully reconfigured {replica['id']}")
+                    
+                # Check replication status
+                check_result = subprocess.run(
+                    ["docker", "exec", replica["container"], "mysql", "-u", "root", "-prootpass", "-e", "SHOW SLAVE STATUS\\G"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if check_result.returncode == 0:
+                    output = check_result.stdout
+                    if "Slave_IO_Running: Yes" in output and "Slave_SQL_Running: Yes" in output:
+                        print(f"✓ {replica['id']} replication is running")
+                    else:
+                        # Extract error info
+                        for line in output.split('\n'):
+                            if 'Last_IO_Error:' in line or 'Last_SQL_Error:' in line:
+                                error_text = line.split(':', 1)[1].strip() if ':' in line else ''
+                                if error_text:
+                                    print(f"  {replica['id']} Error: {error_text}")
+                        
+            except Exception as e:
+                print(f"Warning: Error reconfiguring {replica['id']}: {e}")
+        
+        # Step 3: Update global state
+        with state_lock:
+            current_master = target_replica.copy()
+            # Remove new master from replicas list (old master is already stopped, don't add it back yet)
+            current_replicas = [r.copy() for r in current_replicas if r["id"] != new_leader_id]
+        
+        print(f"Failover complete: new master is {new_leader_id}")
+        
+        return {
+            "success": True,
+            "message": f"Successfully promoted {new_leader_id} to master",
+            "old_master": old_master_id,
+            "new_master": new_leader_id,
+            "new_leader_id": new_leader_id,
+            "reconfigured_replicas": [r["id"] for r in other_replicas]
+        }
+    
+    except Exception as e:
+        return {
+            "success": False,
+            "message": "Promotion failed",
+            "error": str(e)
+        }
+
+
 # ==================== STRESS TEST ENDPOINTS ====================
 
 class StressTestRequest(BaseModel):
