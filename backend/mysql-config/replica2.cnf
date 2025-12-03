@@ -1,5 +1,5 @@
 [mysqld]
-# Server identification
+# Server identification - MUST BE UNIQUE
 server-id = 2
 
 # Binary logging - needed so this replica can become a master
@@ -15,10 +15,6 @@ enforce_gtid_consistency = ON
 relay-log = relay-bin
 relay_log_recovery = ON
 relay_log_purge = ON
-
-# Read-only mode (enabled via init script)
-# read_only = ON
-# super_read_only = ON
 
 # Replication settings
 sync_relay_log = 1

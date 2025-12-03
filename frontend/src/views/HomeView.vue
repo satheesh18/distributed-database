@@ -42,6 +42,10 @@
             <div class="node-badge">MASTER</div>
             <div class="node-id">{{ systemStatus.current_master?.id || 'Loading...' }}</div>
             <div class="node-host">{{ systemStatus.current_master?.host || '' }}</div>
+            <div class="node-timestamp">
+              <span class="timestamp-label">Timestamp:</span>
+              <span class="timestamp-value">{{ masterTimestamp }}</span>
+            </div>
             <div class="node-info">
               <span>Accepts all writes</span>
               <span>Binlog source</span>
@@ -60,6 +64,10 @@
           <div v-for="replica in filteredReplicas" :key="replica.replica_id" class="node-card replica" :class="{ unhealthy: !replica.is_healthy }">
             <div class="node-badge">REPLICA</div>
             <div class="node-id">{{ replica.replica_id }}</div>
+            <div class="node-timestamp">
+              <span class="timestamp-label">Timestamp:</span>
+              <span class="timestamp-value" :class="getLagClass(replica.replication_lag)">{{ masterTimestamp - replica.replication_lag }}</span>
+            </div>
             
             <div class="replica-metrics">
               <div class="metric-row">
@@ -133,19 +141,7 @@
               @click="stopMaster"
               severity="danger"
               :loading="failoverInProgress"
-              :disabled="failoverInProgress || electionInProgress"
-            />
-          </div>
-          
-          <div class="action-card">
-            <h4>Graceful Leader Election</h4>
-            <p>Performs a controlled failover without stopping any containers. Current master is demoted to replica.</p>
-            <Button 
-              label="Elect New Leader" 
-              @click="electLeaderOnly"
-              severity="warning"
-              :loading="electionInProgress"
-              :disabled="failoverInProgress || electionInProgress"
+              :disabled="failoverInProgress"
             />
           </div>
         </div>
@@ -527,7 +523,6 @@ const filteredReplicas = computed(() => {
 
 // Failover State
 const failoverInProgress = ref(false)
-const electionInProgress = ref(false)
 const failoverFlow = ref<any[]>([])
 const failoverResult = ref<any>(null)
 
@@ -683,77 +678,6 @@ const fetchDataCount = async () => {
 }
 
 // Failover functions
-const electLeaderOnly = async () => {
-  failoverFlow.value = []
-  electionInProgress.value = true
-  failoverResult.value = null
-  
-  try {
-    // Get current master ID to exclude from election
-    const currentMasterId = systemStatus.value.current_master?.id || 'instance-1'
-    
-    failoverFlow.value.push({
-      title: 'Initiating SEER Algorithm',
-      detail: `Analyzing replicas to select optimal leader (excluding current master: ${currentMasterId})...`
-    })
-    
-    // Exclude current master from leader election candidates
-    const seerResponse = await fetch('http://localhost:9005/elect-leader', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ exclude_replicas: [currentMasterId] })
-    })
-    const seerData = await seerResponse.json()
-    
-    failoverFlow.value.push({
-      title: 'Leader Selected',
-      detail: `${seerData.leader_id} chosen with score ${seerData.score.toFixed(3)} (latency: ${seerData.latency_ms.toFixed(2)}ms, lag: ${seerData.replication_lag})`
-    })
-
-    failoverFlow.value.push({
-      title: 'Promoting New Leader',
-      detail: `Promoting ${seerData.leader_id} to master, demoting current master to replica`
-    })
-    
-    const failoverResponse = await fetch(`${API_BASE}/admin/trigger-failover`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ new_leader: seerData.leader_id })
-    })
-    
-    const failoverData = await failoverResponse.json()
-    
-    if (failoverData.success) {
-      failoverFlow.value.push({
-        title: 'Failover Complete',
-        detail: `New master: ${failoverData.new_master}, Old master ${failoverData.old_master} is now a replica`
-      })
-      
-      failoverResult.value = {
-        success: true,
-        message: `Graceful failover complete. New master: ${failoverData.new_master}`
-      }
-    } else {
-      failoverResult.value = {
-        success: false,
-        message: `Failover failed: ${failoverData.error || failoverData.message}`
-      }
-    }
-    
-    setTimeout(async () => {
-      await fetchSystemStatus()
-      await fetchMetrics()
-    }, 1500)
-  } catch (error: any) {
-    failoverResult.value = {
-      success: false,
-      message: `Error: ${error.message}`
-    }
-  } finally {
-    electionInProgress.value = false
-  }
-}
-
 const stopMaster = async () => {
   failoverInProgress.value = true
   failoverFlow.value = []
@@ -814,7 +738,7 @@ const stopMaster = async () => {
       detail: `Promoting ${seerData.leader_id} to master...`
     })
     
-    const failoverResponse = await fetch(`${API_BASE}/admin/trigger-failover`, {
+    const failoverResponse = await fetch(`${API_BASE}/admin/promote-leader`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ new_leader: seerData.leader_id })
@@ -1035,17 +959,12 @@ const runStressTest = async () => {
     progressPercent.value = Math.round((liveStats.value.completed / numOps) * 100)
   }
   
-  // Execute operations based on consistency level
-  // STRONG: Small batches to avoid overwhelming Cabinet
-  // EVENTUAL: Larger batches for maximum throughput
-  const batchSize = consistency === 'STRONG' ? 5 : 20
-  for (let i = 0; i < numOps; i += batchSize) {
-    const batch = []
-    for (let j = i; j < Math.min(i + batchSize, numOps); j++) {
-      batch.push(runOperation(j))
-    }
-    await Promise.all(batch)
+  // Execute all operations concurrently
+  const operations = []
+  for (let i = 0; i < numOps; i++) {
+    operations.push(runOperation(i))
   }
+  await Promise.all(operations)
     
   stopProgressTimer()
   
@@ -1287,6 +1206,26 @@ onUnmounted(() => {
 .node-host {
   font-size: 0.75rem;
   opacity: 0.8;
+}
+
+.node-timestamp {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.timestamp-label {
+  opacity: 0.7;
+}
+
+.timestamp-value {
+  font-weight: 600;
+  font-family: monospace;
 }
 
 .node-info {

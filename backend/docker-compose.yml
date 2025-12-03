@@ -29,7 +29,7 @@ services:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
     volumes:
-      - ./mysql-config/replica.cnf:/etc/mysql/conf.d/custom.cnf
+      - ./mysql-config/replica2.cnf:/etc/mysql/conf.d/custom.cnf
       - ./mysql-config/init-replica.sql:/docker-entrypoint-initdb.d/01-init.sql
       - ./mysql-config/init-replication.sh:/docker-entrypoint-initdb.d/99-init-replication.sh
     ports:
@@ -52,9 +52,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
-      SERVER_ID: 3
     volumes:
-      - ./mysql-config/replica.cnf:/etc/mysql/conf.d/custom.cnf
+      - ./mysql-config/replica3.cnf:/etc/mysql/conf.d/custom.cnf
       - ./mysql-config/init-replica.sql:/docker-entrypoint-initdb.d/01-init.sql
       - ./mysql-config/init-replication.sh:/docker-entrypoint-initdb.d/99-init-replication.sh
     ports:
@@ -77,9 +76,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
-      SERVER_ID: 4
     volumes:
-      - ./mysql-config/replica.cnf:/etc/mysql/conf.d/custom.cnf
+      - ./mysql-config/replica4.cnf:/etc/mysql/conf.d/custom.cnf
       - ./mysql-config/init-replica.sql:/docker-entrypoint-initdb.d/01-init.sql
       - ./mysql-config/init-replication.sh:/docker-entrypoint-initdb.d/99-init-replication.sh
     ports:
