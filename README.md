@@ -257,11 +257,10 @@ docker-compose down
 ### Keyaba Gohil
 - Designed and implemented the SEER leader election algorithm and service
 - Implementation of the metrics collector service  
-- Developed unit tests for quorum and leader election logic 
 - Developed the promotion and demotion scripts for failover    
 
 ### Jayateerth Kamatgi
--Designed and implemented the Cabinet quorum selection algorithm and service  
+- Designed and implemented the Cabinet quorum selection algorithm and service  
 - Configured MySQL deployment including Dockerfiles and initialization scripts  
 - Implemented health monitoring, latency measurement, and lag tracking  
 - Contributed to system testing and failure scenario demonstrations 
