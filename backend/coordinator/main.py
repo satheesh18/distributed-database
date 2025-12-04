@@ -478,12 +478,11 @@ async def promote_replica_to_master(replica_container: str) -> bool:
             SET GLOBAL super_read_only = OFF;
         """
         
-        # Execute directly using docker exec
+        # Execute directly using docker exec (no Python-side timeout - let it complete)
         result = subprocess.run(
             ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", promote_sql],
             capture_output=True,
-            text=True,
-            timeout=30
+            text=True
         )
         
         if result.returncode != 0:
@@ -501,8 +500,7 @@ async def promote_replica_to_master(replica_container: str) -> bool:
         result = subprocess.run(
             ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", ensure_replicator_sql],
             capture_output=True,
-            text=True,
-            timeout=30
+            text=True
         )
         if result.returncode != 0:
             print(f"Warning: Could not ensure replicator user: {result.stderr}")
@@ -555,12 +553,11 @@ async def demote_master_to_replica(old_master_container: str, new_master_host: s
             START SLAVE;
         """
         
-        # Execute directly using docker exec
+        # Execute directly using docker exec (no Python-side timeout - let it complete)
         result = subprocess.run(
             ["docker", "exec", old_master_container, "mysql", "-u", "root", "-prootpass", "-e", demote_sql],
             capture_output=True,
-            text=True,
-            timeout=30
+            text=True
         )
         
         if result.returncode != 0:
@@ -1111,7 +1108,7 @@ async def restart_old_master():
             ["docker", "start", old_master_container],
             capture_output=True,
             text=True,
-            timeout=10
+            # timeout removed for machine independence
         )
         
         if result.returncode != 0:
@@ -1267,7 +1264,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
             ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", server_id_sql],
             capture_output=True,
             text=True,
-            timeout=10
+            # timeout removed for machine independence
         )
         
         if result.returncode != 0:
@@ -1284,7 +1281,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
             ["docker", "exec", replica_container, "mysql", "-h", master_host, "-u", "root", "-prootpass", "-e", verify_user_sql],
             capture_output=True,
             text=True,
-            timeout=10
+            # timeout removed for machine independence
         )
         
         if result.returncode != 0:
@@ -1308,7 +1305,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
                     ["docker", "exec", master_container, "mysql", "-u", "root", "-prootpass", "-e", create_user_sql],
                     capture_output=True,
                     text=True,
-                    timeout=10
+                    # timeout removed for machine independence
                 )
                 print("Replicator user created")
         else:
@@ -1323,7 +1320,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
             ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", stop_sql],
             capture_output=True,
             text=True,
-            timeout=10
+            # timeout removed for machine independence
         )
         
         if result.returncode != 0:
@@ -1343,7 +1340,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
             ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", readonly_sql],
             capture_output=True,
             text=True,
-            timeout=10
+            # timeout removed for machine independence
         )
         
         if result.returncode != 0:
@@ -1368,7 +1365,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
             ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", change_master_sql],
             capture_output=True,
             text=True,
-            timeout=10
+            # timeout removed for machine independence
         )
         
         # If newer syntax fails, try older CHANGE MASTER TO syntax
@@ -1387,7 +1384,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
                 ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", change_master_sql_legacy],
                 capture_output=True,
                 text=True,
-                timeout=10
+                # timeout removed for machine independence
             )
             
             if result.returncode != 0:
@@ -1404,7 +1401,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
             ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", start_sql],
             capture_output=True,
             text=True,
-            timeout=10
+            # timeout removed for machine independence
         )
         
         if result.returncode != 0:
@@ -1414,7 +1411,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
                 ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", start_sql_legacy],
                 capture_output=True,
                 text=True,
-                timeout=10
+                # timeout removed for machine independence
             )
             
             if result.returncode != 0:
@@ -1436,7 +1433,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
                 ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", check_sql],
                 capture_output=True,
                 text=True,
-                timeout=10
+                # timeout removed for machine independence
             )
             
             # Try legacy syntax if new one fails
@@ -1446,7 +1443,7 @@ async def configure_replica(replica_container: str, master_host: str) -> bool:
                     ["docker", "exec", replica_container, "mysql", "-u", "root", "-prootpass", "-e", check_sql],
                     capture_output=True,
                     text=True,
-                    timeout=10
+                    # timeout removed for machine independence
                 )
             
             if result.returncode == 0:
@@ -1575,7 +1572,7 @@ async def start_instance(request: StartInstanceRequest):
                      "SHOW SLAVE STATUS\\G"],
                     capture_output=True,
                     text=True,
-                    timeout=10
+                    # timeout removed for machine independence
                 )
                 if "Slave_IO_Running: Yes" in repl_check.stdout and "Slave_SQL_Running: Yes" in repl_check.stdout:
                     print(f"{instance_id} is already running and replicating correctly")
@@ -1593,7 +1590,7 @@ async def start_instance(request: StartInstanceRequest):
             ["docker", "start", instance_container],
             capture_output=True,
             text=True,
-            timeout=10
+            # timeout removed for machine independence
         )
         
         if result.returncode != 0:
@@ -1779,8 +1776,7 @@ async def promote_leader(request: dict):
                 result = subprocess.run(
                     ["docker", "exec", replica["container"], "mysql", "-u", "root", "-prootpass", "-e", stop_sql],
                     capture_output=True,
-                    text=True,
-                    timeout=30
+                    text=True
                 )
                 if result.returncode != 0:
                     print(f"Warning: Failed to stop slave on {replica['id']}: {result.stderr}")
@@ -1798,8 +1794,7 @@ async def promote_leader(request: dict):
                 result = subprocess.run(
                     ["docker", "exec", replica["container"], "mysql", "-u", "root", "-prootpass", "-e", change_master_sql],
                     capture_output=True,
-                    text=True,
-                    timeout=30
+                    text=True
                 )
                 if result.returncode != 0:
                     print(f"Warning: Failed to change master on {replica['id']}: {result.stderr}")
@@ -1808,8 +1803,7 @@ async def promote_leader(request: dict):
                 result = subprocess.run(
                     ["docker", "exec", replica["container"], "mysql", "-u", "root", "-prootpass", "-e", "START SLAVE;"],
                     capture_output=True,
-                    text=True,
-                    timeout=30
+                    text=True
                 )
                 if result.returncode != 0:
                     print(f"Warning: Failed to start slave on {replica['id']}: {result.stderr}")
@@ -1821,7 +1815,7 @@ async def promote_leader(request: dict):
                     ["docker", "exec", replica["container"], "mysql", "-u", "root", "-prootpass", "-e", "SHOW SLAVE STATUS\\G"],
                     capture_output=True,
                     text=True,
-                    timeout=10
+                    # timeout removed for machine independence
                 )
                 if check_result.returncode == 0:
                     output = check_result.stdout
