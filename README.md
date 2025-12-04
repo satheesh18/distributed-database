@@ -26,6 +26,12 @@ distributed-database/
 
 ## Quick Start
 
+You can start the entire distributed database system using **three different methods** depending on your operating system and preference.
+
+---
+
+## Option 1: Manual Startup (Linux / macOS / Windows with Git Bash)
+
 ### 1. Start Backend
 
 ```bash
@@ -48,6 +54,45 @@ cd frontend
 npm install
 npm run dev
 ```
+
+Open http://localhost:5173 in your browser.
+
+---
+
+## Option 2: Windows Users — One-Click Start
+
+If you're on **Windows**, simply run the batch file:
+
+```bat
+run_project.bat
+```
+
+This automatically:
+- Starts all backend Docker containers  
+- Installs frontend dependencies (if missing)  
+- Launches the Vue.js dashboard  
+- Prints service URLs for quick access  
+
+---
+
+Open http://localhost:5173 in your browser.
+
+## Option 3: Linux / macOS — One-Click Start
+
+Use the provided `.run` script:
+
+```bash
+chmod +x run_project.run
+./run_project.run
+```
+
+This script:
+- Starts backend containers  
+- Installs frontend dependencies if needed  
+- Launches the frontend development server  
+- Displays service URLs and live logs  
+
+---
 
 Open http://localhost:5173 in your browser.
 

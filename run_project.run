@@ -1,0 +1,78 @@
+#!/bin/bash
+
+echo "=============================================="
+echo " Distributed Database System - Full Startup"
+echo "=============================================="
+echo
+
+# Ensure script runs from project root
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+##############################################
+# 1. START BACKEND
+##############################################
+echo "➡ Starting backend services (10 containers)..."
+cd backend
+
+docker-compose up -d
+
+if [ $? -ne 0 ]; then
+    echo "❌ Failed to start backend containers."
+    exit 1
+fi
+
+echo "✔ Backend started successfully."
+echo
+
+##############################################
+# 2. WAIT FOR BACKEND SERVICES
+##############################################
+echo "⏳ Waiting for services to initialize (10–20 seconds)..."
+sleep 15
+
+echo "✔ Backend services should now be ready."
+echo
+
+##############################################
+# 3. START FRONTEND
+##############################################
+echo "➡ Starting frontend dashboard..."
+cd ../frontend
+
+# Install node modules if missing
+if [ ! -d "node_modules" ]; then
+    echo "📦 Installing frontend dependencies..."
+    npm install
+fi
+
+echo "🚀 Launching Vite development server..."
+npm run dev &
+FRONTEND_PID=$!
+
+echo
+echo "=============================================="
+echo " Project Started Successfully!"
+echo "=============================================="
+echo
+echo "🌐 Frontend Dashboard:   http://localhost:5173"
+echo "🛠 Coordinator API:       http://localhost:9000"
+echo "🕒 Timestamp Service 1:   http://localhost:9001"
+echo "🕒 Timestamp Service 2:   http://localhost:9002"
+echo "📊 Metrics Collector:     http://localhost:9003"
+echo "🧮 Cabinet Service:       http://localhost:9004"
+echo "🧠 SEER Leader Election:  http://localhost:9005"
+echo
+echo "📦 MySQL Instances:"
+echo " • Master      → localhost:3306"
+echo " • Replica #1  → localhost:3307"
+echo " • Replica #2  → localhost:3308"
+echo " • Replica #3  → localhost:3309"
+echo
+echo "=============================================="
+echo " Press CTRL+C to stop the frontend server."
+echo " Backend containers will continue running."
+echo "=============================================="
+
+# Keep frontend logs visible
+wait $FRONTEND_PID
