@@ -1,68 +1,8 @@
-# Distributed Database System
+# Backend - Distributed Database System
 
-A distributed MySQL database system implementing logical timestamps, adaptive quorums (Cabinet), and performance-aware leader election (SEER).
+Backend services for a distributed MySQL database implementing adaptive quorums (Cabinet) and performance-aware leader election (SEER).
 
-## Overview
-
-This system provides:
-- **Distributed Timestamps**: Global ordering of writes using odd/even assignment
-- **Adaptive Quorum Replication**: Dynamic replica selection based on performance (Cabinet algorithm)
-- **Performance-Aware Failover**: Intelligent leader election on master failure (SEER algorithm)
-- **Strong Consistency**: Quorum-based replication ensures data consistency
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         Client                              │
-└────────────────────────┬────────────────────────────────────┘
-                         │ SQL Queries
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Main Coordinator (FastAPI)                     │
-│  - Query parsing                                            │
-│  - Request routing (writes → master, reads → replicas)      │
-│  - Quorum-based replication (strong consistency)            │
-└──┬────────┬────────┬────────┬────────┬────────┬────────┬───┘
-   │        │        │        │        │        │        │
-   ▼        ▼        ▼        ▼        ▼        ▼        ▼
-┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐
-│MySQL ││MySQL ││MySQL ││MySQL ││Metrics││Cabinet││SEER  ││TS    │
-│Master││Rep 1 ││Rep 2 ││Rep 3 ││Coll. ││      ││      ││Svc   │
-└──────┘└──────┘└──────┘└──────┘└──────┘└──────┘└──────┘└──────┘
-```
-
-### Components
-
-1. **MySQL Instances** (4 containers)
-   - 1 Master: Handles all writes
-   - 3 Replicas: Receive replicated writes, can serve reads
-
-2. **Coordinator** (FastAPI)
-   - Single entry point for all SQL queries
-   - Routes writes to master with quorum-based replication
-   - Routes reads to best available replica (lowest latency, minimal lag)
-   - Coordinates timestamp assignment and **binlog-based replication** with GTID
-
-3. **Timestamp Service** (2 containers)
-   - Server 1: Assigns odd numbers (1, 3, 5, ...)
-   - Server 2: Assigns even numbers (2, 4, 6, ...)
-   - Provides total ordering for write operations
-
-4. **Metrics Collector**
-   - Monitors all MySQL instances
-   - Tracks: latency, replication lag, uptime, crash count
-   - Provides metrics to Cabinet and SEER services
-
-5. **Cabinet Service**
-   - Implements adaptive quorum selection
-   - Weights replicas by performance (latency + lag)
-   - Selects best replicas for write quorum
-
-6. **SEER Service**
-   - Implements performance-aware leader election
-   - Scores replicas by latency, stability, and lag
-   - Elects best replica as new master on failure
+> **Note**: For architecture overview and algorithm explanations, see the main [README.md](../README.md) in the project root.
 
 ## Prerequisites
 
@@ -72,22 +12,30 @@ This system provides:
 ## Quick Start
 
 ```bash
-# Navigate to backend directory
-cd backend
-
-# Start all services
+# Start all services (10 containers)
 docker-compose up -d
 
 # Check service health
 docker-compose ps
 
-# View logs
+# View coordinator logs
 docker-compose logs -f coordinator
 ```
 
-## Usage
+## Service Endpoints
 
-### Write Query
+| Service | Port | Endpoints |
+|---------|------|-----------|
+| Coordinator | 9000 | `/query`, `/status`, `/health`, `/admin/*` |
+| Timestamp 1 | 9001 | `/timestamp`, `/health` |
+| Timestamp 2 | 9002 | `/timestamp`, `/health` |
+| Metrics Collector | 9003 | `/metrics`, `/metrics/{id}`, `/health` |
+| Cabinet | 9004 | `/select-quorum`, `/health` |
+| SEER | 9005 | `/elect-leader`, `/health` |
+
+## API Examples
+
+### Execute a Write Query
 
 ```bash
 curl -X POST http://localhost:9000/query \
@@ -99,40 +47,22 @@ Response:
 ```json
 {
   "success": true,
-  "message": "Write successful (timestamp: 5, quorum: 2/2, total: 3/3)",
+  "message": "Write successful (consistency: STRONG, timestamp: 5, Cabinet replicas: instance-2, instance-3)",
   "timestamp": 5,
   "rows_affected": 1,
-  "executed_on": "mysql-replica-4"
+  "executed_on": "mysql-instance-1",
+  "consistency_level": "STRONG",
+  "latency_ms": 45.23,
+  "quorum_achieved": true
 }
 ```
 
-**Note**: Writes replicate to **all 3 replicas** but only wait for the **quorum (2 best replicas)** to confirm. This ensures no replicas are left behind while maintaining strong consistency and optimal performance.
-
-### Read Query
+### Execute a Read Query
 
 ```bash
 curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
   -d '{"query": "SELECT * FROM users"}'
-```
-
-Response:
-```json
-{
-  "success": true,
-  "message": "Read successful",
-  "data": [
-    {
-      "id": 1,
-      "name": "Alice",
-      "email": "alice@example.com",
-      "created_at": "2025-11-23T16:30:00",
-      "timestamp": 5
-    }
-  ],
-  "rows_affected": 1,
-  "executed_on": "mysql-replica-3"
-}
 ```
 
 ### Check System Status
@@ -144,138 +74,140 @@ curl http://localhost:9000/status
 Response:
 ```json
 {
-  "current_master": "mysql-replica-4",
-  "master_is_original": true,
-  "replicas": ["replica-1", "replica-2", "replica-3"]
+  "current_master": {
+    "id": "instance-1",
+    "host": "mysql-instance-1",
+    "container": "mysql-instance-1"
+  },
+  "current_replicas": [
+    {"id": "instance-2", "host": "mysql-instance-2", "container": "mysql-instance-2"},
+    {"id": "instance-3", "host": "mysql-instance-3", "container": "mysql-instance-3"},
+    {"id": "instance-4", "host": "mysql-instance-4", "container": "mysql-instance-4"}
+  ],
+  "total_replicas": 3,
+  "replication_mode": "binlog"
 }
 ```
 
-## Algorithms
-
-### Timestamp Service
-
-**Purpose**: Provide globally ordered timestamps for write operations
-
-**Implementation**:
-- Two timestamp servers with odd/even assignment
-- Server 1: Returns 1, 3, 5, 7, ...
-- Server 2: Returns 2, 4, 6, 8, ...
-- Coordinator load balances between servers
-- Ensures total ordering of all writes
-
-### Cabinet (Adaptive Quorum)
-
-**Purpose**: Select optimal replicas for write quorum based on performance
-
-**Algorithm**:
-1. Fetch metrics for all replicas
-2. Calculate weight: `weight = 1 / (latency + lag + 1)`
-3. Sort replicas by weight (descending)
-4. Select top N replicas where N = ⌈(3 + 1) / 2⌉ = 2 (majority)
-
-**Benefits**:
-- Faster writes by avoiding slow replicas
-- Strong consistency via majority quorum
-- Adapts to changing network conditions
-
-### SEER (Leader Election)
-
-**Purpose**: Elect best replica as new master when current master fails
-
-**Algorithm**:
-1. Fetch metrics for all replicas
-2. Calculate scores:
-   - Latency score (40%): `1 / (latency + 1)`
-   - Stability score (40%): `uptime / (uptime + crashes * 100 + 1)`
-   - Lag score (20%): `1 / (lag + 1)`
-3. Select replica with highest total score
-
-**Benefits**:
-- Fast, reliable new master
-- Considers performance and stability
-- Minimizes disruption during failover
-
-## Testing
-
-### 1. Basic Write and Read
+### Get Replica Metrics
 
 ```bash
-# Insert data
-curl -X POST http://localhost:9000/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "INSERT INTO users (name, email) VALUES (\"Bob\", \"bob@example.com\")"}'
-
-# Read data
-curl -X POST http://localhost:9000/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "SELECT * FROM users"}'
-```
-
-### 2. Test Failover
-
-```bash
-# Stop the master
-docker-compose stop mysql-replica-4
-
-# Wait a few seconds for detection
-sleep 5
-
-# Try a write (should trigger failover)
-curl -X POST http://localhost:9000/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "INSERT INTO users (name, email) VALUES (\"Charlie\", \"charlie@example.com\")"}'
-
-# Check new master
-curl http://localhost:9000/status
-```
-
-### 3. Check Metrics
-
-```bash
-# View all replica metrics
 curl http://localhost:9003/metrics
-
-# View specific replica
-curl http://localhost:9003/metrics/replica-1
 ```
 
-### 4. Test Quorum Selection
+### Get Quorum Selection (Cabinet)
 
 ```bash
-# Get current quorum
-curl -X POST http://localhost:8004/select-quorum \
+curl -X POST http://localhost:9004/select-quorum \
   -H "Content-Type: application/json" \
   -d '{"operation": "write"}'
 ```
 
-### 5. Test Leader Election
+### Trigger Leader Election (SEER)
 
 ```bash
-# Trigger leader election
 curl -X POST http://localhost:9005/elect-leader \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
 
-## Service Endpoints
-
-| Service | Port | Endpoints |
-|---------|------|-----------|
-| Coordinator | 9000 | `/query`, `/status`, `/health` |
-| Timestamp 1 | 9001 | `/timestamp`, `/health` |
-| Timestamp 2 | 9002 | `/timestamp`, `/health` |
-| Metrics | 9003 | `/metrics`, `/metrics/{id}`, `/health` |
-| Cabinet | 9004 | `/select-quorum`, `/health` |
-| SEER | 9005 | `/elect-leader`, `/health` |
-
-## Stopping the System
+## Testing Failover
 
 ```bash
-# Stop all services
-docker-compose down
+# 1. Stop the master container
+docker stop mysql-instance-1
 
-# Stop and remove volumes (clears data)
-docker-compose down -v
+# 2. Try a write (triggers automatic failover)
+curl -X POST http://localhost:9000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "INSERT INTO users (name, email) VALUES (\"Test\", \"test@example.com\")"}'
+
+# 3. Check new master
+curl http://localhost:9000/status
+
+# 4. Restart old master (becomes replica)
+docker start mysql-instance-1
+curl -X POST http://localhost:9000/admin/restart-old-master
+```
+
+## Stress Testing
+
+### Using the Python Script
+
+```bash
+# Install dependencies first
+pip install aiohttp
+
+# Run all scenarios
+python stress_test.py --scenario all
+
+# Run specific scenarios
+python stress_test.py --scenario concurrent --writes 200
+python stress_test.py --scenario lag
+python stress_test.py --scenario failover
+python stress_test.py --scenario performance
+```
+
+**Scenarios:**
+| Scenario | Description |
+|----------|-------------|
+| `concurrent` | High concurrent write load - tests timestamp ordering and quorum replication |
+| `lag` | Monitor replica lag and Cabinet quorum adaptation |
+| `failover` | Simulate master failure and SEER election |
+| `performance` | Benchmark writes and measure throughput |
+| `all` | Run all scenarios sequentially |
+
+### Using the API Endpoints
+
+```bash
+# Clear all test data and reset timestamps
+curl -X POST http://localhost:9000/admin/clear-data
+
+# Check current data count
+curl http://localhost:9000/admin/stress-test/data-count
+```
+
+**Concurrent Writes Test** - Tests timestamp ordering under load:
+```bash
+curl -X POST http://localhost:9000/admin/stress-test/concurrent-writes \
+  -H "Content-Type: application/json" \
+  -d '{"num_operations": 50, "consistency": "STRONG"}'
+```
+
+**Read/Write Mix Test** - 70% reads, 30% writes (realistic workload):
+```bash
+curl -X POST http://localhost:9000/admin/stress-test/read-write-mix \
+  -H "Content-Type: application/json" \
+  -d '{"num_operations": 100, "consistency": "EVENTUAL"}'
+```
+
+**Consistency Comparison** - Compare EVENTUAL vs STRONG performance:
+```bash
+curl -X POST "http://localhost:9000/admin/stress-test/consistency-comparison?num_operations=30"
+```
+
+### Consistency Levels
+
+| Level | Writes | Reads | Trade-off |
+|-------|--------|-------|-----------|
+| `EVENTUAL` | Master only, return immediately | Any replica | Fast, may read stale data |
+| `STRONG` | Master + wait for Cabinet quorum | Master only | Slower, guaranteed fresh data |
+
+## Project Structure
+
+```
+backend/
+├── docker-compose.yml          # Orchestrates all 10 containers
+├── coordinator/                # Main API gateway
+│   ├── main.py                # Query routing, replication, failover
+│   └── query_parser.py        # SQL query parser
+├── timestamp-service/          # Distributed timestamps (odd/even)
+├── metrics-collector/          # Performance monitoring
+├── cabinet-service/            # Adaptive quorum selection
+├── seer-service/               # Leader election
+├── mysql-config/               # MySQL configuration files
+├── stress_test.py              # Stress testing script
+└── setup.py                    # Setup/reset utility
 ```
 
 ## Troubleshooting
@@ -295,57 +227,20 @@ docker-compose up -d
 ### Connection errors
 
 - Ensure all services are healthy: `docker-compose ps`
-- Check network connectivity: `docker network inspect backend_db-network`
-- Verify MySQL instances are ready: `docker-compose logs mysql-replica-4`
+- Check MySQL instances are ready: `docker-compose logs mysql-instance-1`
+- Verify network: `docker network inspect backend_db-network`
 
 ### Quorum failures
 
 - Check replica health: `curl http://localhost:9003/metrics`
-- Verify at least 2 replicas are healthy
-- Check Cabinet service: `curl http://localhost:8004/health`
+- Ensure at least 2 replicas are healthy for quorum
 
-## Project Structure
+## Stopping the System
 
+```bash
+# Stop all services
+docker-compose down
+
+# Stop and remove volumes (clears all data)
+docker-compose down -v
 ```
-backend/
-├── docker-compose.yml          # Orchestrates all containers
-├── coordinator/                # Main coordinator service
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── main.py                # Query routing and replication
-│   └── query_parser.py        # SQL query parser
-├── timestamp-service/          # Distributed timestamp service
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── main.py                # Odd/even timestamp assignment
-├── metrics-collector/          # Performance monitoring
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── main.py                # Metrics collection
-├── cabinet-service/            # Adaptive quorum selection
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── main.py                # Cabinet algorithm
-├── seer-service/               # Leader election
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── main.py                # SEER algorithm
-└── mysql-config/               # MySQL configuration
-    ├── master.cnf             # Master config
-    ├── replica.cnf            # Replica config
-    └── init.sql               # Database initialization
-```
-
-## Implementation Notes
-
-- **Binlog-Based Replication**: MySQL native binary log replication with GTID automatically propagates writes from master to replicas. The coordinator verifies quorum achievement by checking replica timestamps.
-- **Intelligent Read Routing**: Reads are routed to the best available replica based on latency and replication lag, reducing load on the master and improving read performance.
-- **Strong Consistency**: Achieved through quorum-based writes (majority of replicas must confirm)
-- **Simplified Algorithms**: Core concepts implemented for educational purposes
-- **Minimal Dependencies**: Uses standard Python libraries and FastAPI
-
-## References
-
-- **Timestamp as a Service**: [PVLDB 2023](https://www.vldb.org/pvldb/vol17/p994-li.pdf)
-- **Cabinet**: [arXiv 2025](https://arxiv.org/abs/2503.08914)
-- **SEER**: [arXiv 2021](https://arxiv.org/abs/2104.01355)

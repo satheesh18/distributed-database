@@ -5,12 +5,9 @@ A Vue.js frontend dashboard to visualize and interact with the distributed datab
 ## Features
 
 - **Service Status Monitoring**: Real-time health checks for all 10 services
-- **Replica Metrics**: Live metrics showing latency, replication lag, uptime, and crash count
-- **Query Execution**: Execute SQL queries and see the execution flow step-by-step
-- **Execution Flow Visualization**: See how queries are processed (timestamp assignment, quorum selection, replication)
-- **Quorum Selection**: Visualize Cabinet algorithm selecting optimal replicas
-- **Leader Election**: Trigger SEER algorithm to elect best replica as leader
-- **Master Failover Testing**: Stop/start master to test automatic failover
+- **Cluster Topology**: Visual master-replica layout with live metrics
+- **Failover Testing**: Stop master and trigger SEER-based leader election
+- **Stress Testing**: Run concurrent operations with configurable consistency levels
 
 ## Tech Stack
 
@@ -58,39 +55,36 @@ Shows health status of all 10 services:
 - Cabinet Service (Quorum Selection)
 - SEER Service (Leader Election)
 
-### Replica Metrics
-Real-time table showing:
-- Latency (ms)
-- Replication lag (timestamps behind)
-- Uptime (seconds)
-- Crash count
+### Cluster Topology
+Visual display of master and replicas with real-time metrics:
+- Latency (ms) - network round-trip time
+- Replication lag (transactions behind master)
+- Uptime (time since last restart)
 - Health status
 
-### Query Execution
-- **Execute Query**: Run any SQL query
-- **Insert Sample Data**: Quick button to insert random user data
-- **Get Quorum**: See which replicas Cabinet selects for writes
-- **Elect Leader**: See which replica SEER would elect as new master
+### Failover Testing
+Test automatic leader election:
+- **Stop Master and Failover**: Stops current master, triggers SEER election, promotes best replica
+- Shows step-by-step progress of failover process
+- Old master automatically restarts as replica
 
-### Execution Flow
-Step-by-step visualization showing:
-1. Query parsing
-2. Timestamp assignment (from timestamp service)
-3. Query execution (on master or replica)
-4. Quorum achievement (for writes)
-
-### Danger Zone
-Test failover functionality:
-- **Stop Master**: Triggers automatic leader election
-- **Start Master**: Restores original master
+### Stress Testing
+Run concurrent database operations:
+- Configure number of operations (10, 25, 50, 100)
+- Choose consistency level:
+  - **EVENTUAL**: Fast writes, master only
+  - **STRONG**: Wait for Cabinet-selected replica quorum
+- Live progress with success/failure counts and latency metrics
 
 ## API Endpoints Used
 
-- `http://localhost:8000/query` - Execute SQL queries
-- `http://localhost:8000/status` - Get system status
-- `http://localhost:8003/metrics` - Get replica metrics
-- `http://localhost:8004/select-quorum` - Get optimal quorum
-- `http://localhost:8005/elect-leader` - Elect new leader
+- `http://localhost:9000/status` - Get system status
+- `http://localhost:9000/admin/stop-master-only` - Stop master container
+- `http://localhost:9000/admin/promote-leader` - Promote replica to master
+- `http://localhost:9000/admin/start-instance` - Start/restart instance
+- `http://localhost:9000/admin/stress-test/*` - Stress test endpoints
+- `http://localhost:9003/metrics` - Get replica metrics
+- `http://localhost:9005/elect-leader` - Trigger SEER election
 
 ## Development
 
