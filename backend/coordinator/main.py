@@ -180,16 +180,18 @@ async def get_timestamp() -> int:
     raise HTTPException(status_code=503, detail=f"All timestamp services failed: {str(last_error)}")
 
 
-def execute_query_on_host(host: str, query: str, timestamp: Optional[int] = None) -> Dict:
+def execute_query_on_host(host: str, query: str, timestamp: Optional[int] = None, table_name: Optional[str] = None) -> Dict:
     """
     Execute a SQL query on a specific MySQL host.
     
-    For write queries, also updates the metadata table with the timestamp.
+    For write queries, also updates the metadata table with the timestamp
+    and tracks per-table timestamps for fine-grained replication lag monitoring.
     
     Args:
         host: MySQL host address
         query: SQL query to execute
         timestamp: Optional timestamp for write operations
+        table_name: Optional table name for per-table timestamp tracking
         
     Returns:
         Dictionary with execution results
@@ -203,10 +205,20 @@ def execute_query_on_host(host: str, query: str, timestamp: Optional[int] = None
         
         # For write queries, update metadata with timestamp
         if timestamp is not None:
+            # Update global timestamp
             cursor.execute(
                 "UPDATE _metadata SET last_applied_timestamp = %s WHERE id = 1",
                 (timestamp,)
             )
+            
+            # Update per-table timestamp if table name is provided
+            if table_name:
+                cursor.execute(
+                    """INSERT INTO _table_timestamps (table_name, last_timestamp) 
+                       VALUES (%s, %s) 
+                       ON DUPLICATE KEY UPDATE last_timestamp = %s""",
+                    (table_name, timestamp, timestamp)
+                )
         
         # Get results
         rows_affected = cursor.rowcount
@@ -254,6 +266,33 @@ def get_last_applied_timestamp(host: str) -> int:
     except Exception as e:
         print(f"Error getting timestamp from {host}: {e}")
         return 0
+
+
+def get_table_timestamps(host: str) -> Dict[str, int]:
+    """
+    Get per-table timestamps from a MySQL instance.
+    
+    This allows fine-grained tracking of replication lag per table,
+    so you can know exactly which tables are behind on each replica.
+    
+    Args:
+        host: MySQL host address
+        
+    Returns:
+        Dictionary mapping table names to their last applied timestamps
+    """
+    try:
+        conn = get_mysql_connection(host)
+        cursor = conn.cursor()
+        cursor.execute("SELECT table_name, last_timestamp FROM _table_timestamps")
+        results = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        return {row[0]: row[1] for row in results} if results else {}
+    except Exception as e:
+        print(f"Error getting table timestamps from {host}: {e}")
+        return {}
 
 
 async def check_replicas_health() -> dict:
@@ -547,6 +586,10 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
     
     start_time = time.time()
     
+    # Step 0: Parse query to extract table name for per-table timestamp tracking
+    query_type, tables = parse_query(query)
+    table_name = tables[0] if tables else None
+    
     # Step 1: Get timestamp
     timestamp = await get_timestamp()
     
@@ -555,12 +598,12 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
     if consistency == ConsistencyLevel.STRONG:
         cabinet_quorum = await get_cabinet_quorum()
     
-    # Step 3: Execute on master
+    # Step 3: Execute on master (with per-table timestamp tracking)
     with state_lock:
         master_host = current_master["host"]
         master_container = current_master["container"]
     
-    result = execute_query_on_host(master_host, query, timestamp)
+    result = execute_query_on_host(master_host, query, timestamp, table_name)
     
     # Check if master execution failed
     if not result["success"]:
@@ -607,8 +650,8 @@ async def handle_write_query(query: str, consistency: ConsistencyLevel) -> Query
         
         print(f"Failover complete: new master is {current_master['id']}")
         
-        # Retry on new master
-        result = execute_query_on_host(current_master["host"], query, timestamp)
+        # Retry on new master (with per-table timestamp tracking)
+        result = execute_query_on_host(current_master["host"], query, timestamp, table_name)
         
         if not result["success"]:
             with metrics_lock:
@@ -816,6 +859,55 @@ async def get_status():
             "total_replicas": len(current_replicas),
             "replication_mode": "binlog"
         }
+
+
+@app.get("/table-timestamps")
+async def get_table_timestamps_endpoint():
+    """
+    Get per-table timestamps for all MySQL instances.
+    
+    This shows the replication lag per table on each instance,
+    allowing fine-grained visibility into which tables are behind.
+    
+    Returns:
+        Dictionary with table timestamps for master and each replica
+    """
+    with state_lock:
+        master_host = current_master["host"]
+        master_id = current_master["id"]
+        replicas = list(current_replicas)
+    
+    result = {
+        "master": {
+            "id": master_id,
+            "host": master_host,
+            "global_timestamp": get_last_applied_timestamp(master_host),
+            "table_timestamps": get_table_timestamps(master_host)
+        },
+        "replicas": []
+    }
+    
+    for replica in replicas:
+        replica_timestamps = get_table_timestamps(replica["host"])
+        global_timestamp = get_last_applied_timestamp(replica["host"])
+        
+        # Calculate per-table lag compared to master
+        master_table_ts = result["master"]["table_timestamps"]
+        table_lag = {}
+        for table, ts in master_table_ts.items():
+            replica_ts = replica_timestamps.get(table, 0)
+            table_lag[table] = ts - replica_ts
+        
+        result["replicas"].append({
+            "id": replica["id"],
+            "host": replica["host"],
+            "global_timestamp": global_timestamp,
+            "global_lag": result["master"]["global_timestamp"] - global_timestamp,
+            "table_timestamps": replica_timestamps,
+            "table_lag": table_lag
+        })
+    
+    return result
 
 
 @app.get("/consistency-metrics")

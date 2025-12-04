@@ -162,6 +162,35 @@ def get_last_applied_timestamp(host: str) -> int:
         return 0
 
 
+def get_table_timestamps(host: str) -> dict:
+    """
+    Get per-table timestamps from a MySQL instance.
+    
+    This allows fine-grained tracking of replication lag per table.
+    
+    Args:
+        host: MySQL host address
+        
+    Returns:
+        Dictionary mapping table names to their last applied timestamps
+    """
+    conn = get_mysql_connection(host)
+    if not conn:
+        return {}
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT table_name, last_timestamp FROM _table_timestamps")
+        results = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        return {row[0]: row[1] for row in results} if results else {}
+    except Exception as e:
+        print(f"Error getting table timestamps from {host}: {e}")
+        return {}
+
+
 def get_replication_status(host: str) -> dict:
     """
     Get binlog replication status from a replica.
@@ -391,6 +420,57 @@ async def get_replica_metrics(replica_id: str):
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "replicas_tracked": len(replica_metrics)}
+
+
+@app.get("/table-timestamps")
+async def get_all_table_timestamps():
+    """
+    Get per-table timestamps for all MySQL instances.
+    
+    This endpoint provides fine-grained visibility into replication lag
+    on a per-table basis, which is more precise than AWS RDS's
+    "seconds behind master" metric.
+    
+    Returns:
+        Dictionary with table timestamps and lag for each instance
+    """
+    with current_master_lock:
+        master_host = current_master_host
+    
+    # Get master's table timestamps as the baseline
+    master_table_ts = get_table_timestamps(master_host)
+    master_global_ts = get_last_applied_timestamp(master_host)
+    
+    result = {
+        "master": {
+            "host": master_host,
+            "global_timestamp": master_global_ts,
+            "table_timestamps": master_table_ts
+        },
+        "instances": []
+    }
+    
+    for instance in MYSQL_INSTANCES:
+        host = instance["host"]
+        instance_table_ts = get_table_timestamps(host)
+        instance_global_ts = get_last_applied_timestamp(host)
+        
+        # Calculate per-table lag
+        table_lag = {}
+        for table, master_ts in master_table_ts.items():
+            instance_ts = instance_table_ts.get(table, 0)
+            table_lag[table] = master_ts - instance_ts
+        
+        result["instances"].append({
+            "id": instance["id"],
+            "host": host,
+            "global_timestamp": instance_global_ts,
+            "global_lag": master_global_ts - instance_global_ts,
+            "table_timestamps": instance_table_ts,
+            "table_lag": table_lag
+        })
+    
+    return result
 
 
 if __name__ == "__main__":
