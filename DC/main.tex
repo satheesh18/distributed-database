@@ -70,7 +70,7 @@ distributed databases, quorum replication, leader election, timestamps, consiste
 
 When working with distributed databases, you typically want both consistency and availability even when things go wrong-for example, when the master database crashes or a replica falls behind. In practice, many real-world systems either rely on slow, manual failover scripts or use centralized coordination points that become bottlenecks and single points of failure. The challenge of building reliable distributed storage has been studied extensively since the early days of distributed computing, yet production systems continue to struggle with the fundamental tension between consistency, availability, and partition tolerance famously articulated by the CAP theorem \cite{cap}.
 
-Commercial offerings such as AWS RDS illustrate this tension. A standard deployment runs with a single master and a set of read replicas. Writes only go to the master, and replication to replicas is asynchronous. If the master crashes, failover can take a noticeable amount of time, and there is no strict guarantee that replicas are fully up to date when applications read from them. Google Cloud SQL, Azure Database for MySQL, and similar managed services face analogous constraints. While they offer convenience and operational simplicity, they abstract away critical decisions about consistency semantics, failover behavior, and replica selection, leaving developers with limited visibility into how their data is being managed.
+Commercial offerings such as AWS RDS illustrate this tension. A standard deployment runs with a single master and a set of read replicas. Writes only go to the master, and replication to replicas is asynchronous. If the master crashes, failover can take a noticeable amount of time, and there is no strict guarantee that replicas are fully up to date when applications read from them. Google Cloud SQL, Azure Database for MySQL, and similar managed services face analogous constraints. While they offer convenience and operational simplicity, they abstract away critical decisions about consistency semantics, failover behavior, and replica selection, leaving developers with limited visibility into how their data is being managed. Furthermore, these services typically provide only a coarse ``seconds behind master'' metric for replication lag, offering no insight into which specific tables are behind on each replica.
 
 The problem becomes more acute as applications scale. Consider an e-commerce platform processing hundreds of transactions per second. A master failure during peak traffic can result in lost revenue, frustrated users, and potential data inconsistencies if the failover process is not carefully orchestrated. Similarly, a financial services application that reads stale data from a lagging replica might display incorrect account balances, leading to compliance violations or customer disputes. These are not hypothetical scenarios; they represent real challenges faced by engineering teams at companies of all sizes.
 
@@ -85,6 +85,7 @@ To meet these goals, we use MySQL as the storage engine but layer it with three 
     \item \textbf{Logical timestamps} to keep writes in globally consistent order without a centralized timestamp oracle. By distributing timestamp generation across multiple servers with non-overlapping sequences, we eliminate a common single point of failure while preserving the total ordering property essential for serializability.
     \item \textbf{Adaptive quorum selection (Cabinet)} that favors faster, more up-to-date replicas. Rather than treating all replicas as interchangeable, Cabinet weights them by observed latency and replication lag, allowing the system to consistently route writes through the healthiest subset of the cluster.
     \item \textbf{Performance-aware leader election (SEER)} that picks the most stable and responsive replica if the master fails. Traditional leader election algorithms choose leaders based on node IDs or random selection; SEER instead uses historical performance metrics-latency, uptime, and crash frequency-to select a leader that is likely to perform well in the master role.
+    \item \textbf{Per-table timestamp tracking} that provides fine-grained visibility into replication lag. Unlike AWS RDS's coarse ``seconds behind master'' metric, our system tracks the last applied timestamp for each table on each replica, enabling precise identification of which tables are behind and by how many operations.
 \end{itemize}
 
 Together, these mechanisms give us a system that handles failure better, responds faster, and still maintains consistency guarantees. The combination is greater than the sum of its parts: timestamps provide ordering, Cabinet ensures writes go to healthy replicas, and SEER ensures that failover promotes the right node. The rest of this report expands on the problem, the related work, our methodology and system architecture, and a detailed evaluation of the resulting prototype.
@@ -533,7 +534,7 @@ The \texttt{POST /elect-leader} endpoint accepts the list of candidate replicas 
 Four MySQL 8.0 containers form the data layer: one master (\texttt{mysql-instance-1}) and three replicas (\texttt{mysql-instance-2}, \texttt{mysql-instance-3}, \texttt{mysql-instance-4}). Each instance is configured with:
 \begin{itemize}
     \item The \texttt{testdb} database containing application tables (e.g., \texttt{users}, \texttt{products})
-    \item A \texttt{\_metadata} table tracking the last applied timestamp:
+    \item A \texttt{\_metadata} table tracking the global last applied timestamp:
     \begin{lstlisting}[language=sql,basicstyle=\ttfamily\tiny]
 CREATE TABLE _metadata (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -541,6 +542,15 @@ CREATE TABLE _metadata (
   last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
     \end{lstlisting}
+    \item A \texttt{\_table\_timestamps} table for per-table replication tracking:
+    \begin{lstlisting}[language=sql,basicstyle=\ttfamily\tiny]
+CREATE TABLE _table_timestamps (
+  table_name VARCHAR(255) PRIMARY KEY,
+  last_timestamp BIGINT DEFAULT 0,
+  last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+    \end{lstlisting}
+    This enables fine-grained visibility into which specific tables are behind on each replica---a significant improvement over AWS RDS's coarse ``seconds behind master'' metric.
     \item Custom configuration for GTID-based replication (\texttt{master.cnf} or \texttt{replicaX.cnf})
     \item A replication user (\texttt{replicator}) for binlog streaming between instances
 \end{itemize}
@@ -908,13 +918,13 @@ Services interact through REST APIs:
 \hline
 \textbf{Service} & \textbf{Port} & \textbf{Key Endpoints} \\
 \hline
-Coordinator & 9000 & /query, /status, /health \\
+Coordinator & 9000 & /query, /status, /table-timestamps \\
 \hline
 Timestamp 1 & 9001 & /timestamp, /health, /reset \\
 \hline
 Timestamp 2 & 9002 & /timestamp, /health, /reset \\
 \hline
-Metrics & 9003 & /metrics, /metrics/\{id\} \\
+Metrics & 9003 & /metrics, /table-timestamps \\
 \hline
 Cabinet & 9004 & /select-quorum \\
 \hline
