@@ -1020,15 +1020,14 @@ async def stop_master():
             replica_container = new_master_info["container"]
             new_master_id = new_master_info["id"]
         
-        # Step 1: Stop the master container
+        # Step 1: Stop the master container (don't impose a short Python-side timeout)
         print(f"Stopping {master_container} container...")
         result = subprocess.run(
             ["docker", "stop", master_container],
             capture_output=True,
-            text=True,
-            timeout=10
+            text=True
         )
-        
+
         if result.returncode != 0:
             print(f"Failed to stop master: {result.stderr}")
             return {
@@ -1036,11 +1035,17 @@ async def stop_master():
                 "message": "Failed to stop master",
                 "error": result.stderr
             }
-        
-        print("Master stopped successfully")
-        
-        # Step 2: Wait for container to stop
-        await asyncio.sleep(2)
+
+        print("docker stop returned; waiting for container to be observed as stopped")
+
+        # Step 2: Wait for the container to actually be stopped (poll until stopped)
+        stopped = await wait_for_container_stop(master_container, poll_interval=1.0, max_wait_seconds=120)
+        if not stopped:
+            return {
+                "success": False,
+                "message": "Master stop did not complete in time",
+                "error": "Timed out waiting for container to stop"
+            }
         
         # Step 3: Promote replica to master
         promotion_success = await promote_replica_to_master(replica_container)
@@ -1193,6 +1198,38 @@ async def wait_for_mysql_ready(container: str, max_retries: int = 30) -> bool:
         await asyncio.sleep(1)
     
     return False
+
+
+async def wait_for_container_stop(container: str, poll_interval: float = 1.0, max_wait_seconds: Optional[int] = None) -> bool:
+    """
+    Wait for a Docker container to stop by polling its running state.
+
+    This avoids relying on fixed sleep durations and Python-side timeouts
+    when attempting to stop a container for failover. If `max_wait_seconds`
+    is None, this will wait indefinitely (polling) until the container is
+    observed as not running. Returns True when the container is stopped,
+    False if we exceeded `max_wait_seconds`.
+    """
+    start = time.time()
+    while True:
+        try:
+            inspect = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", container],
+                capture_output=True,
+                text=True
+            )
+            running = inspect.returncode == 0 and "true" in inspect.stdout.lower()
+            if not running:
+                print(f"Container {container} is not running")
+                return True
+        except Exception as e:
+            print(f"Error inspecting container {container}: {e}")
+
+        if max_wait_seconds is not None and (time.time() - start) > max_wait_seconds:
+            print(f"Timed out waiting for container {container} to stop after {max_wait_seconds}s")
+            return False
+
+        await asyncio.sleep(poll_interval)
 
 
 async def configure_replica(replica_container: str, master_host: str) -> bool:
@@ -1637,15 +1674,14 @@ async def stop_master_only(request: dict):
             master_container = current_master["container"]
             master_id = current_master["id"]
         
-        # Stop the master container
+        # Stop the master container (don't impose a short Python-side timeout)
         print(f"Stopping {master_container} container...")
         result = subprocess.run(
             ["docker", "stop", master_container],
             capture_output=True,
-            text=True,
-            timeout=10
+            text=True
         )
-        
+
         if result.returncode != 0:
             print(f"Failed to stop master: {result.stderr}")
             return {
@@ -1653,9 +1689,17 @@ async def stop_master_only(request: dict):
                 "message": "Failed to stop master",
                 "error": result.stderr
             }
-        
-        print(f"Master {master_container} stopped successfully")
-        
+
+        print(f"docker stop returned for {master_container}; waiting to observe container stopped")
+
+        stopped = await wait_for_container_stop(master_container, poll_interval=1.0, max_wait_seconds=120)
+        if not stopped:
+            return {
+                "success": False,
+                "message": "Master stop did not complete in time",
+                "error": "Timed out waiting for container to stop"
+            }
+
         return {
             "success": True,
             "message": f"Master {master_id} stopped successfully",
