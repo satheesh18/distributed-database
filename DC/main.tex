@@ -1519,7 +1519,7 @@ In practice, n (number of replicas) is small (3-5), so even O(n log n) operation
 We measured system throughput under different workload patterns:
 
 \begin{itemize}
-    \item \textbf{Write-heavy (100\% writes)}: 20-30 ops/sec with QUORUM consistency. The bottleneck is the quorum acknowledgment latency, as each write must wait for 2 of 3 replicas.
+    \item \textbf{Write-heavy (100\% writes)}: 20-30 ops/sec with Strong consistency. The bottleneck is the quorum acknowledgment latency, as each write must wait for 2 of 3 replicas.
     \item \textbf{Read-heavy (90\% reads, 10\% writes)}: 80-100 ops/sec. Reads are distributed across replicas, and the coordinator can handle many concurrent read requests using async I/O.
     \item \textbf{Mixed (70\% reads, 30\% writes)}: 50-60 ops/sec. This represents a typical OLTP workload.
 \end{itemize}
@@ -1553,14 +1553,14 @@ P99.9 & 150 & 80 \\
 
 The tail latencies (P99, P99.9) are significantly higher than median latencies due to occasional garbage collection pauses in Python, Docker container scheduling, and TCP retransmits. Production systems would benefit from connection pooling and more aggressive timeouts.
 
-\subsection{Comparison with Baseline}
+\subsection{Comparison of Consistency Modes}
 
-We compared Cabinet's adaptive quorum selection against two baseline strategies:
+We compared our two consistency modes to understand the performance trade-offs:
 
-\begin{enumerate}
-    \item \textbf{Wait for ALL replicas}: The coordinator waits for all 3 replicas to acknowledge before returning. This provides maximum durability but highest latency.
-    \item \textbf{Random QUORUM}: The coordinator selects 2 random replicas for the quorum, without considering performance metrics.
-\end{enumerate}
+\begin{itemize}
+    \item \textbf{Eventual}: Writes are executed on the master only, with asynchronous binlog replication to replicas. This provides the lowest latency but allows reading stale data from replicas.
+    \item \textbf{Strong}: Writes are executed on the master, then the coordinator waits for Cabinet-selected quorum replicas to catch up via binlog replication before returning success. This ensures durability and read-after-write consistency.
+\end{itemize}
 
 \begin{table}[h]
 \centering
@@ -1571,13 +1571,13 @@ We compared Cabinet's adaptive quorum selection against two baseline strategies:
 \hline
 Eventual (Master only) & 18ms & Fastest, async replication \\
 \hline
-Strong (Cabinet quorum) & 35ms & Waits for quorum acks \\
+Strong (Cabinet quorum) & 35ms & Waits for quorum catch-up \\
 \hline
 \end{tabular}
 \label{tab:comparison}
 \end{table}
 
-Strong consistency with Cabinet's adaptive quorum selection provides durability guarantees while maintaining reasonable latency. The Cabinet algorithm consistently selects the fastest replicas for the quorum, avoiding stragglers. Eventual consistency provides nearly 2x lower latency by only waiting for master acknowledgment.
+Strong consistency with Cabinet's adaptive quorum selection provides durability guarantees while maintaining reasonable latency. The Cabinet algorithm consistently selects the fastest replicas for the quorum, avoiding stragglers and reducing tail latency. Eventual consistency provides nearly 2x lower latency by only waiting for master acknowledgment, making it suitable for workloads that can tolerate temporary staleness.
 
 \subsection{Failover Performance}
 
@@ -1713,13 +1713,13 @@ The system successfully handles the failure scenarios we tested: master crashes,
 This project provided valuable insights into the challenges of building distributed systems:
 
 \begin{enumerate}
-    \item \textbf{Simplicity vs. Completeness}: Starting with a minimal implementation helped us understand core concepts before adding complexity. We initially tried to implement full MySQL binary log replication but found it overly complex for our educational goals. Switching to application-level replication allowed us to focus on the distributed algorithms.
+    \item \textbf{Simplicity vs. Completeness}: Starting with a minimal implementation helped us understand core concepts before adding complexity. Implementing MySQL's GTID-based binlog replication required careful attention to server IDs, GTID tracking, and replica configuration. We learned that proper error handling during failover and replica reconfiguration is crucial for maintaining replication consistency across the cluster.
     
     \item \textbf{Observability Matters}: The metrics collector proved essential for debugging and algorithm tuning. Without visibility into replica latencies, lag values, and health states, we could not have verified that Cabinet and SEER were making correct decisions. Investing early in observability paid dividends throughout development.
     
     \item \textbf{Failure Testing is Hard}: Simulating realistic failures requires careful orchestration. Docker made this manageable by allowing us to stop and start containers programmatically, but we still encountered race conditions and timing issues that took time to debug. Production systems need even more sophisticated failure injection frameworks.
     
-    \item \textbf{Trade-offs are Real}: The CAP theorem isn't just theoretical-we directly observed the consistency/availability trade-off. When we configured the system for ALL consistency, it became unavailable during single-node failures. When we relaxed to ONE consistency, we could observe stale reads. Understanding these trade-offs at a visceral level was one of the most valuable outcomes of the project.
+    \item \textbf{Trade-offs are Real}: The CAP theorem isn't just theoretical-we directly observed the consistency/availability trade-off. When we configured the system for Strong consistency, writes required quorum acknowledgment which increased latency but ensured durability. When we relaxed to Eventual consistency, we could observe faster writes but with the possibility of reading stale data from replicas. Understanding these trade-offs at a visceral level was one of the most valuable outcomes of the project.
     
     \item \textbf{Distributed Debugging is Different}: Traditional debugging techniques (breakpoints, step-through) are less useful when requests span multiple containers. We relied heavily on structured logging, correlation IDs, and the metrics collector to understand system behavior.
     
