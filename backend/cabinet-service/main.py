@@ -119,7 +119,10 @@ async def select_quorum(request: QuorumRequest):
     """
     # Fetch current metrics
     metrics_data = await fetch_metrics()
-    replicas = metrics_data.get("replicas", [])
+    all_instances = metrics_data.get("replicas", [])
+    
+    # Filter out master - we only want actual replicas for quorum
+    replicas = [r for r in all_instances if not r.get("is_master", False)]
     
     if not replicas:
         raise HTTPException(status_code=503, detail="No replicas available")

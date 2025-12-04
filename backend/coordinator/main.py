@@ -735,16 +735,51 @@ async def handle_read_query(query: str, consistency: ConsistencyLevel) -> QueryR
     start_time = time.time()
     
     if consistency == ConsistencyLevel.EVENTUAL:
-        # EVENTUAL: Try replica first (no health check overhead)
+        # EVENTUAL: Route to lowest-latency healthy replica based on metrics
         with state_lock:
             master_host = current_master["host"]
             replicas = current_replicas.copy()
         
-        # Try random replica, fallback to master on error
+        # Fetch metrics to select best replica
+        best_replica = None
         if replicas:
-            replica = random.choice(replicas)
-            replica_host = replica["host"]
-            
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(f"{METRICS_COLLECTOR_URL}/metrics", timeout=2.0)
+                    if response.status_code == 200:
+                        metrics_data = response.json()
+                        replica_metrics_list = metrics_data.get("replicas", [])
+                        
+                        # Build lookup: replica_id -> metrics
+                        metrics_lookup = {m["replica_id"]: m for m in replica_metrics_list}
+                        
+                        # Filter healthy replicas and sort by latency
+                        healthy_replicas = []
+                        for r in replicas:
+                            metrics = metrics_lookup.get(r["id"])
+                            if metrics and metrics.get("is_healthy", False):
+                                healthy_replicas.append({
+                                    "replica": r,
+                                    "latency_ms": metrics.get("latency_ms", 9999)
+                                })
+                        
+                        # Sort by latency (lowest first)
+                        healthy_replicas.sort(key=lambda x: x["latency_ms"])
+                        
+                        if healthy_replicas:
+                            best_replica = healthy_replicas[0]["replica"]
+                            print(f"Read routing: selected {best_replica['id']} (latency: {healthy_replicas[0]['latency_ms']:.2f}ms)")
+            except Exception as e:
+                print(f"Failed to fetch metrics for read routing: {e}, falling back to random")
+        
+        # Fallback to random if metrics unavailable
+        if not best_replica and replicas:
+            best_replica = random.choice(replicas)
+            print(f"Read routing: random fallback to {best_replica['id']}")
+        
+        # Execute read on selected replica or master
+        if best_replica:
+            replica_host = best_replica["host"]
             result = execute_query_on_host(replica_host, query)
             
             # Fallback to master if replica fails
@@ -2136,6 +2171,197 @@ async def get_data_count():
         }
     except Exception as e:
         return {"error": str(e), "users": 0, "products": 0, "total": 0}
+
+
+@app.get("/admin/current-quorum")
+async def get_current_quorum():
+    """
+    Get the current Cabinet quorum selection based on live metrics.
+    
+    Returns:
+        Current quorum selection with replica weights and metrics
+    """
+    try:
+        # Fetch current metrics
+        async with httpx.AsyncClient() as client:
+            metrics_response = await client.get(f"{METRICS_COLLECTOR_URL}/metrics", timeout=5.0)
+            metrics_data = metrics_response.json()
+            
+            # Call Cabinet to get quorum
+            cabinet_response = await client.post(
+                f"{CABINET_SERVICE_URL}/select-quorum",
+                json={"replicas": metrics_data["replicas"]},
+                timeout=5.0
+            )
+            cabinet_data = cabinet_response.json()
+        
+        # Filter to show only actual replicas (not master)
+        with state_lock:
+            master_id = current_master["id"]
+            replica_ids = [r["id"] for r in current_replicas]
+        
+        cabinet_quorum = cabinet_data.get("quorum", [])
+        filtered_quorum = [rid for rid in cabinet_quorum if rid in replica_ids]
+        
+        return {
+            "master": master_id,
+            "cabinet_selected": cabinet_quorum,
+            "actual_replicas_to_wait": filtered_quorum,
+            "quorum_size": cabinet_data.get("quorum_size"),
+            "total_instances": cabinet_data.get("total_replicas"),
+            "metrics": {
+                m["replica_id"]: {
+                    "latency_ms": round(m["latency_ms"], 2),
+                    "replication_lag": m["replication_lag"],
+                    "is_healthy": m["is_healthy"]
+                }
+                for m in metrics_data["replicas"]
+            }
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/admin/stress-test/read-after-write")
+async def stress_test_read_after_write(num_trials: int = 20):
+    """
+    Read-After-Write Consistency Test.
+    
+    Compares STRONG vs EVENTUAL consistency for read-after-write scenarios.
+    
+    For each trial:
+    1. Write a unique record
+    2. Immediately read it back
+    3. Check if data is found (consistent) or not found (stale)
+    
+    Args:
+        num_trials: Number of trials per consistency level (default: 20)
+        
+    Returns:
+        RAWTestResult with success rates and detailed logs
+    """
+    base_ts = int(time.time() * 1000)
+    trial_logs = []
+    
+    # Test STRONG consistency
+    strong_success = 0
+    strong_latencies = []
+    strong_logs = []
+    
+    for i in range(num_trials):
+        trial_start = time.time()
+        unique_name = f"RAW_Strong_{base_ts}_{i}"
+        unique_email = f"raw_strong_{base_ts}_{i}@test.com"
+        
+        # Write with STRONG
+        write_query = f'INSERT INTO users (name, email) VALUES ("{unique_name}", "{unique_email}")'
+        try:
+            write_result = await handle_write_query(write_query, ConsistencyLevel.STRONG)
+            write_success = write_result.success
+        except Exception as e:
+            write_success = False
+        
+        # Immediately read with STRONG
+        read_query = f'SELECT * FROM users WHERE name="{unique_name}"'
+        try:
+            read_result = await handle_read_query(read_query, ConsistencyLevel.STRONG)
+            data_found = read_result.data is not None and len(read_result.data) > 0
+        except Exception as e:
+            data_found = False
+        
+        trial_latency = (time.time() - trial_start) * 1000
+        strong_latencies.append(trial_latency)
+        
+        if data_found:
+            strong_success += 1
+            
+        strong_logs.append({
+            "trial": i + 1,
+            "write_success": write_success,
+            "data_found": data_found,
+            "latency_ms": round(trial_latency, 2)
+        })
+    
+    # Test EVENTUAL consistency
+    eventual_success = 0
+    eventual_latencies = []
+    eventual_logs = []
+    
+    for i in range(num_trials):
+        trial_start = time.time()
+        unique_name = f"RAW_Eventual_{base_ts}_{i}"
+        unique_email = f"raw_eventual_{base_ts}_{i}@test.com"
+        
+        # Write with EVENTUAL
+        write_query = f'INSERT INTO users (name, email) VALUES ("{unique_name}", "{unique_email}")'
+        try:
+            write_result = await handle_write_query(write_query, ConsistencyLevel.EVENTUAL)
+            write_success = write_result.success
+        except Exception as e:
+            write_success = False
+        
+        # Immediately read with EVENTUAL
+        read_query = f'SELECT * FROM users WHERE name="{unique_name}"'
+        try:
+            read_result = await handle_read_query(read_query, ConsistencyLevel.EVENTUAL)
+            data_found = read_result.data is not None and len(read_result.data) > 0
+        except Exception as e:
+            data_found = False
+        
+        trial_latency = (time.time() - trial_start) * 1000
+        eventual_latencies.append(trial_latency)
+        
+        if data_found:
+            eventual_success += 1
+            
+        eventual_logs.append({
+            "trial": i + 1,
+            "write_success": write_success,
+            "data_found": data_found,
+            "latency_ms": round(trial_latency, 2)
+        })
+    
+    # Combine logs
+    trial_logs = [
+        {"consistency": "STRONG", "trials": strong_logs},
+        {"consistency": "EVENTUAL", "trials": eventual_logs}
+    ]
+    
+    # Calculate results
+    strong_results = {
+        "success_count": strong_success,
+        "total_trials": num_trials,
+        "success_rate": round(strong_success / num_trials * 100, 1),
+        "stale_reads": num_trials - strong_success,
+        "avg_latency_ms": round(sum(strong_latencies) / len(strong_latencies), 2),
+        "min_latency_ms": round(min(strong_latencies), 2),
+        "max_latency_ms": round(max(strong_latencies), 2)
+    }
+    
+    eventual_results = {
+        "success_count": eventual_success,
+        "total_trials": num_trials,
+        "success_rate": round(eventual_success / num_trials * 100, 1),
+        "stale_reads": num_trials - eventual_success,
+        "avg_latency_ms": round(sum(eventual_latencies) / len(eventual_latencies), 2),
+        "min_latency_ms": round(min(eventual_latencies), 2),
+        "max_latency_ms": round(max(eventual_latencies), 2)
+    }
+    
+    return {
+        "test_name": "Read-After-Write Consistency Comparison",
+        "num_trials": num_trials,
+        "strong_results": strong_results,
+        "eventual_results": eventual_results,
+        "summary": {
+            "strong_success_rate": f"{strong_results['success_rate']}%",
+            "eventual_success_rate": f"{eventual_results['success_rate']}%",
+            "strong_guarantees_raw": strong_results['success_rate'] == 100.0,
+            "eventual_stale_read_rate": f"{round((num_trials - eventual_success) / num_trials * 100, 1)}%",
+            "conclusion": "STRONG guarantees read-after-write consistency" if strong_results['success_rate'] == 100.0 else "Unexpected: STRONG had stale reads"
+        },
+        "trial_logs": trial_logs
+    }
 
 
 if __name__ == "__main__":

@@ -72,6 +72,7 @@ class ReplicaMetrics(BaseModel):
     crash_count: int
     last_updated: str
     is_healthy: bool
+    is_master: bool = False  # Whether this instance is the current master
 
 
 class MetricsResponse(BaseModel):
@@ -361,6 +362,17 @@ async def get_all_metrics():
         MetricsResponse: Contains metrics for all instances and master timestamp
     """
     with metrics_lock:
+        # Get current master info
+        with current_master_lock:
+            master_host = current_master_host
+        
+        # Find master_id from host
+        master_id = None
+        for instance in MYSQL_INSTANCES:
+            if instance["host"] == master_host:
+                master_id = instance["id"]
+                break
+        
         replicas = []
         for replica_id, metrics in replica_metrics.items():
             replicas.append(ReplicaMetrics(
@@ -370,12 +382,9 @@ async def get_all_metrics():
                 uptime_seconds=metrics["uptime_seconds"],
                 crash_count=metrics["crash_count"],
                 last_updated=datetime.now().isoformat(),
-                is_healthy=metrics["is_healthy"]
+                is_healthy=metrics["is_healthy"],
+                is_master=(replica_id == master_id)  # Mark if this is the master
             ))
-        
-        # Get master timestamp from the CURRENT master
-        with current_master_lock:
-            master_host = current_master_host
         
         master_timestamp = get_last_applied_timestamp(master_host)
         

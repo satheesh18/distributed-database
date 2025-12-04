@@ -28,7 +28,7 @@ import json
 from datetime import datetime
 
 API_BASE = "http://localhost:9000"
-METRICS_URL = "http://localhost:8003/metrics"
+METRICS_URL = "http://localhost:9003/metrics"
 
 class Colors:
     HEADER = '\033[95m'
@@ -184,7 +184,7 @@ async def scenario_replica_lag():
             # Get quorum selection
             try:
                 async with session.post(
-                    "http://localhost:8004/select-quorum",
+                    "http://localhost:9004/select-quorum",
                     json={"operation": "write"}
                 ) as response:
                     quorum_data = await response.json()
@@ -258,7 +258,7 @@ async def scenario_master_failover():
         # Show SEER election details
         try:
             async with session.post(
-                "http://localhost:8005/elect-leader",
+                "http://localhost:9005/elect-leader",
                 json={}
             ) as response:
                 leader_data = await response.json()
