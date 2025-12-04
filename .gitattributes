@@ -1,0 +1,8 @@
+# Force Unix line endings for shell scripts (fixes Windows CRLF issue)
+*.sh text eol=lf
+*.sql text eol=lf
+*.cnf text eol=lf
+
+# Docker files
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
