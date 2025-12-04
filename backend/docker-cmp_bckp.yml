@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   # MySQL Master Instance
   mysql-instance-1:
@@ -6,32 +8,18 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
-    command:
-      - --server-id=1
-      - --log-bin=mysql-bin
-      - --binlog_format=ROW
-      - --binlog_expire_logs_seconds=604800
-      - --max_binlog_size=100M
-      - --gtid_mode=ON
-      - --enforce_gtid_consistency=ON
-      - --sync_binlog=1
-      - --binlog_cache_size=32K
-      - --performance_schema=ON
-      - --max_connections=200
-      - --bind-address=0.0.0.0
-      - --binlog-ignore-db=mysql
     volumes:
+      - ./mysql-config/master.cnf:/etc/mysql/conf.d/custom.cnf
       - ./mysql-config/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "3306:3306"
     networks:
       - db-network
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p{MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 3s
-      retries: 10
-      start_period: 30s
+      retries: 5
 
   # MySQL Replica Instance 2
   mysql-instance-2:
@@ -40,24 +28,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
-    command:
-      - --server-id=2
-      - --log-bin=mysql-bin
-      - --binlog_format=ROW
-      - --log_slave_updates=ON
-      - --gtid_mode=ON
-      - --enforce_gtid_consistency=ON
-      - --relay-log=relay-bin
-      - --relay_log_recovery=ON
-      - --relay_log_purge=ON
-      - --sync_relay_log=1
-      - --slave_parallel_workers=4
-      - --slave_parallel_type=LOGICAL_CLOCK
-      - --performance_schema=ON
-      - --max_connections=200
-      - --bind-address=0.0.0.0
-      - --replicate-ignore-db=mysql
     volumes:
+      - ./mysql-config/replica2.cnf:/etc/mysql/conf.d/custom.cnf
       - ./mysql-config/init-replica.sql:/docker-entrypoint-initdb.d/01-init.sql
       - ./mysql-config/init-replication.sh:/docker-entrypoint-initdb.d/99-init-replication.sh
     ports:
@@ -68,11 +40,10 @@ services:
       mysql-instance-1:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p{MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 3s
-      retries: 10
-      start_period: 30s
+      retries: 5
 
   # MySQL Replica Instance 3
   mysql-instance-3:
@@ -81,24 +52,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
-    command:
-      - --server-id=3
-      - --log-bin=mysql-bin
-      - --binlog_format=ROW
-      - --log_slave_updates=ON
-      - --gtid_mode=ON
-      - --enforce_gtid_consistency=ON
-      - --relay-log=relay-bin
-      - --relay_log_recovery=ON
-      - --relay_log_purge=ON
-      - --sync_relay_log=1
-      - --slave_parallel_workers=4
-      - --slave_parallel_type=LOGICAL_CLOCK
-      - --performance_schema=ON
-      - --max_connections=200
-      - --bind-address=0.0.0.0
-      - --replicate-ignore-db=mysql
     volumes:
+      - ./mysql-config/replica3.cnf:/etc/mysql/conf.d/custom.cnf
       - ./mysql-config/init-replica.sql:/docker-entrypoint-initdb.d/01-init.sql
       - ./mysql-config/init-replication.sh:/docker-entrypoint-initdb.d/99-init-replication.sh
     ports:
@@ -109,11 +64,10 @@ services:
       mysql-instance-1:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p{MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 3s
-      retries: 10
-      start_period: 30s
+      retries: 5
 
   # MySQL Replica Instance 4
   mysql-instance-4:
@@ -122,24 +76,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: testdb
-    command:
-      - --server-id=4
-      - --log-bin=mysql-bin
-      - --binlog_format=ROW
-      - --log_slave_updates=ON
-      - --gtid_mode=ON
-      - --enforce_gtid_consistency=ON
-      - --relay-log=relay-bin
-      - --relay_log_recovery=ON
-      - --relay_log_purge=ON
-      - --sync_relay_log=1
-      - --slave_parallel_workers=4
-      - --slave_parallel_type=LOGICAL_CLOCK
-      - --performance_schema=ON
-      - --max_connections=200
-      - --bind-address=0.0.0.0
-      - --replicate-ignore-db=mysql
     volumes:
+      - ./mysql-config/replica4.cnf:/etc/mysql/conf.d/custom.cnf
       - ./mysql-config/init-replica.sql:/docker-entrypoint-initdb.d/01-init.sql
       - ./mysql-config/init-replication.sh:/docker-entrypoint-initdb.d/99-init-replication.sh
     ports:
@@ -150,11 +88,10 @@ services:
       mysql-instance-1:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpass"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p{MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 3s
-      retries: 10
-      start_period: 30s
+      retries: 5
 
   # Timestamp Service 1 (Odd numbers)
   timestamp-service-1:

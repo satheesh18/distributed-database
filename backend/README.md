@@ -35,37 +35,9 @@ docker-compose logs -f coordinator
 
 ## API Examples
 
-### Execute a Write Query
+### 1. Basic Operations
 
-```bash
-curl -X POST http://localhost:9000/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "INSERT INTO users (name, email) VALUES (\"Alice\", \"alice@example.com\")"}'
-```
-
-Response:
-```json
-{
-  "success": true,
-  "message": "Write successful (consistency: STRONG, timestamp: 5, Cabinet replicas: instance-2, instance-3)",
-  "timestamp": 5,
-  "rows_affected": 1,
-  "executed_on": "mysql-instance-1",
-  "consistency_level": "STRONG",
-  "latency_ms": 45.23,
-  "quorum_achieved": true
-}
-```
-
-### Execute a Read Query
-
-```bash
-curl -X POST http://localhost:9000/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "SELECT * FROM users"}'
-```
-
-### Check System Status
+#### Check System Status
 
 ```bash
 curl http://localhost:9000/status
@@ -89,21 +61,138 @@ Response:
 }
 ```
 
-### Get Replica Metrics
+#### Execute a Write Query (EVENTUAL - Fast)
+
+```bash
+curl -X POST http://localhost:9000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "INSERT INTO users (name, email) VALUES (\"Alice\", \"alice@example.com\")", "consistency": "EVENTUAL"}'
+```
+
+#### Execute a Write Query (STRONG - Waits for Quorum)
+
+```bash
+curl -X POST http://localhost:9000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "INSERT INTO users (name, email) VALUES (\"Bob\", \"bob@example.com\")", "consistency": "STRONG"}'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "message": "Write successful (consistency: STRONG, timestamp: 5, Cabinet replicas: instance-2, instance-3)",
+  "timestamp": 5,
+  "rows_affected": 1,
+  "executed_on": "mysql-instance-1",
+  "consistency_level": "STRONG",
+  "latency_ms": 45.23,
+  "quorum_achieved": true
+}
+```
+
+#### Execute a Read Query
+
+```bash
+curl -X POST http://localhost:9000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "SELECT * FROM users"}'
+```
+
+### 2. Monitoring & Metrics
+
+#### Get Replica Health Metrics
 
 ```bash
 curl http://localhost:9003/metrics
 ```
 
-### Get Quorum Selection (Cabinet)
+Response:
+```json
+{
+  "replicas": [
+    {
+      "replica_id": "instance-2",
+      "latency_ms": 14.1,
+      "replication_lag": 0,
+      "is_healthy": true
+    }
+  ],
+  "master_timestamp": 113
+}
+```
+
+#### Get Table Timestamps (Replication Lag)
+
+```bash
+curl http://localhost:9000/table-timestamps
+```
+
+Response:
+```json
+{
+  "master": {
+    "id": "instance-1",
+    "global_timestamp": 113,
+    "table_timestamps": {"users": 113, "products": 0}
+  },
+  "replicas": [
+    {
+      "id": "instance-2",
+      "global_timestamp": 113,
+      "global_lag": 0,
+      "table_timestamps": {"users": 113, "products": 0},
+      "table_lag": {"users": 0, "products": 0}
+    }
+  ]
+}
+```
+
+#### Get Consistency Metrics (EVENTUAL vs STRONG)
+
+```bash
+curl http://localhost:9000/consistency-metrics
+```
+
+Response:
+```json
+{
+  "EVENTUAL": {
+    "write_count": 50,
+    "avg_write_latency_ms": 1508.34,
+    "failures": 0,
+    "success_rate": 100.0
+  },
+  "STRONG": {
+    "write_count": 50,
+    "avg_write_latency_ms": 4567.01,
+    "failures": 0,
+    "quorum_not_achieved": 0,
+    "success_rate": 100.0
+  }
+}
+```
+
+### 3. Distributed Algorithms
+
+#### Get Quorum Selection (Cabinet)
 
 ```bash
 curl -X POST http://localhost:9004/select-quorum \
   -H "Content-Type: application/json" \
-  -d '{"operation": "write"}'
+  -d '{}'
 ```
 
-### Trigger Leader Election (SEER)
+Response:
+```json
+{
+  "quorum": ["instance-3", "instance-2", "instance-4"],
+  "quorum_size": 3,
+  "total_replicas": 4
+}
+```
+
+#### Trigger Leader Election (SEER)
 
 ```bash
 curl -X POST http://localhost:9005/elect-leader \

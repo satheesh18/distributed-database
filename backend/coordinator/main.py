@@ -205,18 +205,18 @@ def execute_query_on_host(host: str, query: str, timestamp: Optional[int] = None
         
         # For write queries, update metadata with timestamp
         if timestamp is not None:
-            # Update global timestamp
+            # Update global timestamp (only if higher - handles concurrent writes)
             cursor.execute(
-                "UPDATE _metadata SET last_applied_timestamp = %s WHERE id = 1",
+                "UPDATE _metadata SET last_applied_timestamp = GREATEST(last_applied_timestamp, %s) WHERE id = 1",
                 (timestamp,)
             )
             
-            # Update per-table timestamp if table name is provided
+            # Update per-table timestamp if table name is provided (only if higher)
             if table_name:
                 cursor.execute(
                     """INSERT INTO _table_timestamps (table_name, last_timestamp) 
                        VALUES (%s, %s) 
-                       ON DUPLICATE KEY UPDATE last_timestamp = %s""",
+                       ON DUPLICATE KEY UPDATE last_timestamp = GREATEST(last_timestamp, %s)""",
                     (table_name, timestamp, timestamp)
                 )
         

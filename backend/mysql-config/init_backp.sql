@@ -1,15 +1,14 @@
--- Master initialization - SCHEMA ONLY
--- Data seeding is handled by coordinator AFTER replication is established
--- This ensures data goes through normal replication path
-
+-- Initialize test database
 USE testdb;
 
--- Create replication user
+-- Create replication user for binlog replication
+-- This will be used by replicas to connect to master
 CREATE USER IF NOT EXISTS 'replicator'@'%' IDENTIFIED BY 'replicator_password';
 GRANT REPLICATION SLAVE ON *.* TO 'replicator'@'%';
 GRANT SELECT ON testdb.* TO 'replicator'@'%';
 FLUSH PRIVILEGES;
 
+-- Create metadata table for tracking global timestamps and replication
 CREATE TABLE IF NOT EXISTS _metadata (
     id INT AUTO_INCREMENT PRIMARY KEY,
     last_applied_timestamp BIGINT DEFAULT 0,
@@ -17,8 +16,11 @@ CREATE TABLE IF NOT EXISTS _metadata (
     INDEX idx_timestamp (last_applied_timestamp)
 );
 
-INSERT INTO _metadata (id, last_applied_timestamp) VALUES (1, 0);
+-- Insert initial metadata row
+INSERT INTO _metadata (last_applied_timestamp) VALUES (0) ON DUPLICATE KEY UPDATE last_applied_timestamp=last_applied_timestamp;
 
+-- Create per-table timestamp tracking table
+-- This allows tracking replication lag per table for fine-grained observability
 CREATE TABLE IF NOT EXISTS _table_timestamps (
     table_name VARCHAR(255) PRIMARY KEY,
     last_timestamp BIGINT DEFAULT 0,
@@ -26,9 +28,11 @@ CREATE TABLE IF NOT EXISTS _table_timestamps (
     INDEX idx_timestamp (last_timestamp)
 );
 
-INSERT INTO _table_timestamps (table_name, last_timestamp) VALUES ('users', 0);
-INSERT INTO _table_timestamps (table_name, last_timestamp) VALUES ('products', 0);
+-- Initialize timestamps for known tables
+INSERT INTO _table_timestamps (table_name, last_timestamp) VALUES ('users', 0) ON DUPLICATE KEY UPDATE last_timestamp=last_timestamp;
+INSERT INTO _table_timestamps (table_name, last_timestamp) VALUES ('products', 0) ON DUPLICATE KEY UPDATE last_timestamp=last_timestamp;
 
+-- Create sample users table for testing
 CREATE TABLE IF NOT EXISTS users (
     id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
@@ -38,6 +42,7 @@ CREATE TABLE IF NOT EXISTS users (
     INDEX idx_timestamp (timestamp)
 );
 
+-- Create sample products table for testing
 CREATE TABLE IF NOT EXISTS products (
     id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
