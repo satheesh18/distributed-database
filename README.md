@@ -205,3 +205,35 @@ docker-compose down
 - **Timestamp as a Service**: [PVLDB 2023](https://www.vldb.org/pvldb/vol17/p994-li.pdf)
 - **Cabinet**: [arXiv 2025](https://arxiv.org/abs/2503.08914)
 - **SEER**: [arXiv 2021](https://arxiv.org/abs/2104.01355)
+
+
+## Individual Responsibilities
+
+### Keyaba Gohil
+- Designed and implemented the SEER leader election algorithm and service
+- Implementation of the metrics collector service  
+- Developed unit tests for quorum and leader election logic 
+- Developed the promotion and demotion scripts for failover    
+
+### Jayateerth Kamatgi
+-Designed and implemented the Cabinet quorum selection algorithm and service  
+- Configured MySQL deployment including Dockerfiles and initialization scripts  
+- Implemented health monitoring, latency measurement, and lag tracking  
+- Contributed to system testing and failure scenario demonstrations 
+
+### Satheesh Kumar G R 
+- Designed and implemented the timestamp service for both instances 
+- Implemented the coordinator service including query parsing and routing  
+- Integrated all microservices and coordinated the Docker Compose setup  
+- Developed the stress test script and concurrent write tests  
+
+
+## Shared Activities
+- Initial system design and architecture decisions  
+- Literature review and paper selection (2 papers per person)  
+- Code reviews and integration testing  
+- Debugging distributed issues and race conditions  
+- Report writing, editing, and proofreading  
+- Preparation of presentation slides and demo recording  
+
+
