@@ -134,19 +134,19 @@ Open http://localhost:5173 in your browser.
 ## Features
 
 ### Backend
-- ✅ **Distributed Timestamps**: Odd/even assignment for global ordering
-- ✅ **Adaptive Quorum Replication**: Cabinet algorithm selects best replicas
-- ✅ **Performance-Aware Leader Election**: SEER algorithm for intelligent failover
-- ✅ **Strong Consistency**: Quorum-based writes (majority confirmation)
-- ✅ **Intelligent Read Routing**: Routes to best replica based on latency/lag
-- ✅ **Binlog-Based Replication**: MySQL native binary log replication with GTID
+- **Distributed Timestamps**: Odd/even assignment for global ordering
+- **Adaptive Quorum Replication**: Cabinet algorithm selects best replicas
+- **Performance-Aware Leader Election**: SEER algorithm for intelligent failover
+- **Strong Consistency**: Quorum-based writes (majority confirmation)
+- **Intelligent Read Routing**: Routes to best replica based on latency/lag
+- **Binlog-Based Replication**: MySQL native binary log replication with GTID
 
 ### Frontend Dashboard
-- ✅ **Service Status Monitoring**: Real-time health checks for all 10 services
-- ✅ **Cluster Topology**: Visual master-replica layout with live metrics
-- ✅ **Replica Metrics**: Live display of latency, lag, uptime per replica
-- ✅ **Failover Testing**: Stop master and trigger SEER election with progress visualization
-- ✅ **Stress Testing**: Run concurrent operations with configurable consistency levels
+- **Service Status Monitoring**: Real-time health checks for all 10 services
+- **Cluster Topology**: Visual master-replica layout with live metrics
+- **Replica Metrics**: Live display of latency, lag, uptime per replica
+- **Failover Testing**: Stop master and trigger SEER election with progress visualization
+- **Stress Testing**: Run concurrent operations with configurable consistency levels
 
 ## Usage Examples
 

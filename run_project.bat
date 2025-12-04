@@ -21,13 +21,13 @@ cd backend
 docker-compose up -d
 IF ERRORLEVEL 1 (
     echo.
-    echo ❌ Failed to start backend containers. Check Docker Desktop and docker-compose.
+    echo [ERROR] Failed to start backend containers. Check Docker Desktop and docker-compose.
     echo.
     pause
     exit /b 1
 )
 
-echo ✔ Backend started successfully.
+echo [OK] Backend started successfully.
 echo.
 
 REM ----------------------------------------------
@@ -35,7 +35,7 @@ REM 2. WAIT FOR SERVICES TO INITIALIZE
 REM ----------------------------------------------
 echo [2/3] Waiting for backend services to initialize (about 15 seconds)...
 timeout /t 15 /nobreak >nul
-echo ✔ Backend services should now be ready.
+echo [OK] Backend services should now be ready.
 echo.
 
 REM Go back to project root
@@ -52,7 +52,7 @@ IF NOT EXIST node_modules (
     call npm install
     IF ERRORLEVEL 1 (
         echo.
-        echo ❌ npm install failed. Make sure Node.js and npm are installed.
+        echo [ERROR] npm install failed. Make sure Node.js and npm are installed.
         echo.
         pause
         exit /b 1
