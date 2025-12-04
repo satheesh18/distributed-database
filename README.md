@@ -3,7 +3,7 @@
 ## Project Structure
 
 ```
-final_project/
+distributed-database/
 ├── backend/                    # Distributed database backend
 │   ├── docker-compose.yml     # Orchestrates 10 containers
 │   ├── coordinator/           # Main API (FastAPI)
@@ -12,20 +12,25 @@ final_project/
 │   ├── cabinet-service/       # Adaptive quorum
 │   ├── seer-service/          # Leader election
 │   ├── mysql-config/          # MySQL setup
-│   ├── README.md             # Backend documentation
-│   └── WALKTHROUGH.md        # Implementation walkthrough
+│   └── README.md              # Backend documentation
 │
-└── frontend/                  # Vue.js dashboard
+└── frontend/                   # Vue.js dashboard
     ├── src/
     │   ├── views/
-    │   │   └── HomeView.vue  # Main dashboard
-    │   ├── main.ts           # App setup with PrimeVue
-    │   └── assets/main.css   # Custom styles
+    │   │   └── HomeView.vue   # Main dashboard
+    │   ├── main.ts            # App setup with PrimeVue
+    │   └── assets/main.css    # Custom styles
     ├── package.json
-    └── README.md             # Frontend documentation
+    └── README.md              # Frontend documentation
 ```
 
 ## Quick Start
+
+You can start the entire distributed database system using **three different methods** depending on your operating system and preference.
+
+---
+
+## Option 1: Manual Startup (Linux / macOS / Windows with Git Bash)
 
 ### 1. Start Backend
 
@@ -49,6 +54,45 @@ cd frontend
 npm install
 npm run dev
 ```
+
+Open http://localhost:5173 in your browser.
+
+---
+
+## Option 2: Windows Users — One-Click Start
+
+If you're on **Windows**, simply run the batch file:
+
+```bat
+run_project.bat
+```
+
+This automatically:
+- Starts all backend Docker containers  
+- Installs frontend dependencies (if missing)  
+- Launches the Vue.js dashboard  
+- Prints service URLs for quick access  
+
+---
+
+Open http://localhost:5173 in your browser.
+
+## Option 3: Linux / macOS — One-Click Start
+
+Use the provided `.run` script:
+
+```bash
+chmod +x run_project.run
+./run_project.run
+```
+
+This script:
+- Starts backend containers  
+- Installs frontend dependencies if needed  
+- Launches the frontend development server  
+- Displays service URLs and live logs  
+
+---
 
 Open http://localhost:5173 in your browser.
 
@@ -98,55 +142,45 @@ Open http://localhost:5173 in your browser.
 - ✅ **Binlog-Based Replication**: MySQL native binary log replication with GTID
 
 ### Frontend Dashboard
-- ✅ **Service Status Monitoring**: Real-time health checks for all services
-- ✅ **Replica Metrics**: Live table showing latency, lag, uptime, crashes
-- ✅ **Query Execution**: Execute SQL queries with visual feedback
-- ✅ **Execution Flow**: Step-by-step visualization of query processing
-- ✅ **Quorum Selection**: Visualize Cabinet algorithm in action
-- ✅ **Leader Election**: Trigger and visualize SEER algorithm
-- ✅ **Master Failover Testing**: Stop/start master to test automatic failover
+- ✅ **Service Status Monitoring**: Real-time health checks for all 10 services
+- ✅ **Cluster Topology**: Visual master-replica layout with live metrics
+- ✅ **Replica Metrics**: Live display of latency, lag, uptime per replica
+- ✅ **Failover Testing**: Stop master and trigger SEER election with progress visualization
+- ✅ **Stress Testing**: Run concurrent operations with configurable consistency levels
 
 ## Usage Examples
 
-### Execute a Write Query
+### Monitor Cluster Status
 
 1. Open the dashboard at http://localhost:5173
-2. In the "Query Execution" section, enter:
-   ```sql
-   INSERT INTO users (name, email) VALUES ("Alice", "alice@example.com")
-   ```
-3. Click "Execute Query"
-4. Watch the execution flow:
-   - Query parsing
-   - Timestamp assignment (e.g., timestamp: 5)
-   - Execution on master
-   - Quorum achievement (2/2 replicas)
-
-### Test Quorum Selection
-
-1. Click "Get Quorum" button
-2. See Cabinet algorithm select best replicas
-3. Execution flow shows:
-   - Selected quorum (e.g., replica-3, replica-2)
-   - Quorum size (2 out of 3)
-
-### Test Leader Election
-
-1. Click "Elect Leader" button
-2. See SEER algorithm score all replicas
-3. Execution flow shows:
-   - Elected leader (e.g., replica-3)
-   - Leader score (based on latency, stability, lag)
+2. View **Service Status** section for health of all 10 services
+3. View **Cluster Topology** to see master and replica metrics:
+   - Latency (network round-trip time)
+   - Replication lag (transactions behind master)
+   - Uptime and health status
 
 ### Test Master Failover
 
-1. In "Danger Zone", click "Stop Master"
-2. Execute a write query
-3. Watch automatic failover:
-   - Master failure detected
-   - SEER elects new leader
-   - Query retried on new master
-   - System continues operating
+1. In the **Failover Testing** section, click "Stop Master and Failover"
+2. Watch the failover progress:
+   - Current master is stopped
+   - SEER algorithm scores all replicas
+   - Best replica is elected as new master
+   - Other replicas reconfigure to follow new master
+   - Old master restarts as a replica
+
+### Run Stress Test
+
+1. Go to the **Stress Testing** section
+2. Configure the test:
+   - Select number of concurrent operations (10, 25, 50, or 100)
+   - Choose consistency level (EVENTUAL or STRONG)
+3. Click "Run Stress Test"
+4. Watch live progress showing:
+   - Operations completed
+   - Success/failure counts
+   - Average latency
+   - Timestamp ordering verification
 
 ## API Endpoints
 
@@ -208,13 +242,43 @@ docker-compose down
 
 ## Documentation
 
-- **Backend README**: `backend/README.md`
-- **Backend Walkthrough**: `backend/WALKTHROUGH.md`
-- **Frontend README**: `frontend/README.md`
-- **Project Description**: `desc.md`
+- **Backend README**: `backend/README.md` - API examples, testing, troubleshooting
+- **Frontend README**: `frontend/README.md` - Dashboard features and setup
 
 ## References
 
 - **Timestamp as a Service**: [PVLDB 2023](https://www.vldb.org/pvldb/vol17/p994-li.pdf)
 - **Cabinet**: [arXiv 2025](https://arxiv.org/abs/2503.08914)
 - **SEER**: [arXiv 2021](https://arxiv.org/abs/2104.01355)
+
+
+## Individual Responsibilities
+
+### Keyaba Gohil
+- Designed and implemented the SEER leader election algorithm and service
+- Implementation of the metrics collector service  
+- Developed unit tests for quorum and leader election logic 
+- Developed the promotion and demotion scripts for failover    
+
+### Jayateerth Kamatgi
+-Designed and implemented the Cabinet quorum selection algorithm and service  
+- Configured MySQL deployment including Dockerfiles and initialization scripts  
+- Implemented health monitoring, latency measurement, and lag tracking  
+- Contributed to system testing and failure scenario demonstrations 
+
+### Satheesh Kumar G R 
+- Designed and implemented the timestamp service for both instances 
+- Implemented the coordinator service including query parsing and routing  
+- Integrated all microservices and coordinated the Docker Compose setup  
+- Developed the stress test script and concurrent write tests  
+
+
+## Shared Activities
+- Initial system design and architecture decisions  
+- Literature review and paper selection (2 papers per person)  
+- Code reviews and integration testing  
+- Debugging distributed issues and race conditions  
+- Report writing, editing, and proofreading  
+- Preparation of presentation slides and demo recording  
+
+
