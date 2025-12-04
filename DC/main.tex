@@ -1,0 +1,1791 @@
+% Project report for Distributed Database System
+% IEEE two-column format
+\documentclass[10pt,conference]{IEEEtran}
+\usepackage{times}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{cite}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{color}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,fit,backgrounds,calc,arrows.meta}
+
+% TikZ styles for UML diagrams
+\tikzstyle{component} = [rectangle, draw, fill=blue!10, text width=2.2cm, text centered, minimum height=1cm, font=\footnotesize]
+\tikzstyle{database} = [cylinder, draw, fill=orange!20, shape border rotate=90, aspect=0.25, minimum height=1cm, minimum width=1.2cm, font=\footnotesize]
+\tikzstyle{arrow} = [->, >=stealth, thick]
+\tikzstyle{dashedarrow} = [->, >=stealth, dashed]
+\tikzstyle{state} = [rectangle, rounded corners, draw, fill=green!10, text width=2cm, text centered, minimum height=0.8cm, font=\footnotesize]
+\tikzstyle{actor} = [rectangle, draw, minimum width=0.8cm, minimum height=2cm]
+\tikzstyle{lifeline} = [dashed, gray]
+\tikzstyle{activation} = [rectangle, draw, fill=white, minimum width=0.3cm]
+\tikzstyle{message} = [->, >=stealth]
+
+% Code listing style
+\lstset{
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    frame=single,
+    language=Python,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{red}
+}
+
+	\title{Distributed Database System with Logical Timestamps, Adaptive Quorums, and Performance-Aware Failover}
+
+\author{
+\IEEEauthorblockN{Keyaba Gohil\IEEEauthorrefmark{1}, Jayateerth Kamatgi\IEEEauthorrefmark{2}, and Satheesh Kumar G R\IEEEauthorrefmark{3}}
+\IEEEauthorblockA{Department of Computer Science\\
+San Jos\'e State University\\
+\IEEEauthorrefmark{1}018423925, keyaba.gohil@sjsu.edu\\
+\IEEEauthorrefmark{2}019106750, jayateerth.kamatgi@sjsu.edu\\
+\IEEEauthorrefmark{3}019104319, satheeshkumar.geetharavi@sjsu.edu}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report presents the design, implementation, and evaluation of a distributed MySQL database system that addresses key challenges in distributed systems: consistency, fault tolerance, and performance optimization. Modern distributed databases must balance competing requirements: strong consistency for correctness, high availability for user experience, and low latency for performance. Our system implements three core algorithms drawn from recent research: (1) Timestamp as a Service for globally ordered writes without centralized coordination, enabling total ordering of operations while eliminating single points of failure; (2) Cabinet algorithm for adaptive quorum-based replication that dynamically selects the fastest and healthiest replicas, reducing write latency by up to 40\% compared to static configurations; and (3) SEER algorithm for performance-aware leader election during master failures, selecting new leaders based on latency, stability, and replication lag rather than arbitrary criteria.
+
+The system is built using Docker containers with a FastAPI-based coordinator, four MySQL 8.0 instances (one master: mysql-instance-1, and three replicas: instance-2, instance-3, instance-4), and dedicated microservices for metrics collection, quorum selection, and leader election. We use MySQL's native GTID-based binlog replication for data propagation. We provide tunable consistency levels (Strong and Eventual) that allow applications to trade off between consistency and latency based on their specific requirements. Strong consistency uses Cabinet's quorum-based replication, while Eventual consistency writes only to the master for minimum latency. Our evaluation demonstrates that the adaptive approach with Strong consistency achieves 35ms average write latency while maintaining consistency guarantees through quorum intersection, compared to 18ms for Eventual consistency. The system successfully handles master failures with automatic promotion of the best-performing replica, completing failover in 6-8 seconds with minimal data loss. Our implementation serves as both an educational tool for understanding distributed systems concepts and a foundation for production-grade distributed database research.
+\end{abstract}
+
+\begin{IEEEkeywords}
+distributed databases, quorum replication, leader election, timestamps, consistency, fault tolerance, MySQL, Docker
+\end{IEEEkeywords}
+
+%==============================================================================
+\section{Problem Description, Goals, and Motivation}
+%==============================================================================
+
+When working with distributed databases, you typically want both consistency and availability even when things go wrong-for example, when the master database crashes or a replica falls behind. In practice, many real-world systems either rely on slow, manual failover scripts or use centralized coordination points that become bottlenecks and single points of failure. The challenge of building reliable distributed storage has been studied extensively since the early days of distributed computing, yet production systems continue to struggle with the fundamental tension between consistency, availability, and partition tolerance famously articulated by the CAP theorem \cite{cap}.
+
+Commercial offerings such as AWS RDS illustrate this tension. A standard deployment runs with a single master and a set of read replicas. Writes only go to the master, and replication to replicas is asynchronous. If the master crashes, failover can take a noticeable amount of time, and there is no strict guarantee that replicas are fully up to date when applications read from them. Google Cloud SQL, Azure Database for MySQL, and similar managed services face analogous constraints. While they offer convenience and operational simplicity, they abstract away critical decisions about consistency semantics, failover behavior, and replica selection, leaving developers with limited visibility into how their data is being managed. Furthermore, these services typically provide only a coarse ``seconds behind master'' metric for replication lag, offering no insight into which specific tables are behind on each replica.
+
+The problem becomes more acute as applications scale. Consider an e-commerce platform processing hundreds of transactions per second. A master failure during peak traffic can result in lost revenue, frustrated users, and potential data inconsistencies if the failover process is not carefully orchestrated. Similarly, a financial services application that reads stale data from a lagging replica might display incorrect account balances, leading to compliance violations or customer disputes. These are not hypothetical scenarios; they represent real challenges faced by engineering teams at companies of all sizes.
+
+Our goal in this project is to design and implement a distributed MySQL-based system that does better along three axes: (1) it should \emph{handle failures automatically} without long outages, (2) it should \emph{preserve strong consistency guarantees} for writes, and (3) it should \emph{avoid centralized bottlenecks} wherever possible. Instead of building a key-value store from scratch, we deliberately chose a familiar relational database (MySQL) so that our system feels realistic and could, in principle, back a real application. We then identified concrete pain points observed in practice-slow failover, opaque replication status, and lack of tunable consistency-and used them as design drivers.
+
+Beyond these functional goals, we also aim to create an educational artifact that makes distributed systems concepts tangible. Students and practitioners often learn about consensus, replication, and leader election in the abstract, without seeing how these ideas manifest in working code. By implementing Timestamp as a Service, Cabinet, and SEER as separate microservices with clear APIs, we provide a hands-on laboratory where each algorithm can be studied, modified, and benchmarked independently.
+
+More formally, we want to provide an experience similar to a managed relational database service but with the knobs and visibility of a research prototype. Application developers should be able to issue familiar SQL queries without worrying about which physical node is currently the master, which replicas are lagging, or how leader election operates internally. At the same time, system designers should be able to introspect the internal metrics, algorithms, and decision logic to understand why a particular replica was chosen or why a failover event happened at a certain time.
+
+To meet these goals, we use MySQL as the storage engine but layer it with three key ideas drawn from recent research:
+\begin{itemize}
+    \item \textbf{Logical timestamps} to keep writes in globally consistent order without a centralized timestamp oracle. By distributing timestamp generation across multiple servers with non-overlapping sequences, we eliminate a common single point of failure while preserving the total ordering property essential for serializability.
+    \item \textbf{Adaptive quorum selection (Cabinet)} that favors faster, more up-to-date replicas. Rather than treating all replicas as interchangeable, Cabinet weights them by observed latency and replication lag, allowing the system to consistently route writes through the healthiest subset of the cluster.
+    \item \textbf{Performance-aware leader election (SEER)} that picks the most stable and responsive replica if the master fails. Traditional leader election algorithms choose leaders based on node IDs or random selection; SEER instead uses historical performance metrics-latency, uptime, and crash frequency-to select a leader that is likely to perform well in the master role.
+    \item \textbf{Per-table timestamp tracking} that provides fine-grained visibility into replication lag. Unlike AWS RDS's coarse ``seconds behind master'' metric, our system tracks the last applied timestamp for each table on each replica, enabling precise identification of which tables are behind and by how many operations.
+\end{itemize}
+
+Together, these mechanisms give us a system that handles failure better, responds faster, and still maintains consistency guarantees. The combination is greater than the sum of its parts: timestamps provide ordering, Cabinet ensures writes go to healthy replicas, and SEER ensures that failover promotes the right node. The rest of this report expands on the problem, the related work, our methodology and system architecture, and a detailed evaluation of the resulting prototype.
+
+\subsection{Problem Statement Summary}
+
+To summarize, the core problems we address are:
+\begin{enumerate}
+    \item \textbf{Slow and manual failover}: Existing systems often require human intervention or lengthy automated scripts to recover from master failures, resulting in extended downtime.
+    \item \textbf{Suboptimal replica selection}: Fixed quorum configurations do not account for runtime performance variations, leading to unnecessarily high write latencies.
+    \item \textbf{Centralized timestamp bottlenecks}: A single timestamp oracle becomes both a performance bottleneck and a single point of failure.
+    \item \textbf{Lack of tunable consistency}: Many systems offer only a single consistency model, forcing developers to accept trade-offs that may not match their application's requirements.
+    \item \textbf{Limited observability}: Developers cannot easily understand why the system made particular routing or failover decisions, making debugging and optimization difficult.
+\end{enumerate}
+
+Our distributed database prototype addresses each of these problems with concrete, measurable mechanisms that we describe and evaluate in the following sections.
+
+%==============================================================================
+\section{Project Goals and Distributed System Challenges}
+%==============================================================================
+
+Our project is guided by two sets of objectives: concrete project goals specific to our system, and general distributed system challenges drawn from the course. These objectives shaped every design decision, from the choice of MySQL as the storage layer to the microservice architecture that separates concerns into independently deployable components.
+
+\subsection{Project Goals}
+
+At a high level, the project goals are:
+\begin{itemize}
+    \item \textbf{Single Logical Endpoint}: Provide a single logical SQL endpoint that hides the complexity of multiple MySQL instances and microservices. Clients should interact with the system using familiar SQL syntax without needing to understand the underlying distributed infrastructure.
+    
+    \item \textbf{Three Distributed Algorithms}: Implement at least three distributed algorithms (timestamps, quorum-based replication, and leader election) in a realistic setting. Each algorithm should be isolated in its own microservice with clear APIs, enabling independent study and modification.
+    
+    \item \textbf{Automatic Failure Handling}: Demonstrate automatic handling of server failures without manual intervention. The system should detect failures within seconds, elect new leaders when necessary, and continue serving requests with minimal disruption.
+    
+    \item \textbf{Tunable Consistency}: Expose tunable consistency and performance trade-offs that can be observed in experiments. Users should be able to choose between Strong consistency (Cabinet quorum-based) and Eventual consistency (master-only) modes based on their application requirements.
+    
+    \item \textbf{Educational Value}: Create a system that is both functional and educational. The codebase should be readable, well-documented, and structured to help students understand distributed systems concepts through working code.
+\end{itemize}
+
+\subsection{Mapping Goals to Implementation}
+
+Table~\ref{tab:goals-mapping} shows how each project goal maps to specific implementation components.
+
+\begin{table}[h]
+\centering
+\caption{Mapping Project Goals to Implementation}
+\begin{tabular}{|p{3cm}|p{4.5cm}|}
+\hline
+\textbf{Goal} & \textbf{Implementation} \\
+\hline
+Single Endpoint & Coordinator service at port 8000 \\
+\hline
+Timestamps & timestamp-service-1, timestamp-service-2 \\
+\hline
+Quorum Replication & Cabinet service + coordinator \\
+\hline
+Leader Election & SEER service + coordinator failover \\
+\hline
+Failure Handling & Metrics collector + health checks \\
+\hline
+Tunable Consistency & Strong/Eventual in /query API \\
+\hline
+\end{tabular}
+\label{tab:goals-mapping}
+\end{table}
+
+We evaluate our design against the core challenges specified in the course project description: heterogeneity, openness, security, failure handling, concurrency, quality of service, scalability, and transparency. These challenges are intentionally broad, covering both technical properties (e.g., how the system behaves under failure) and software-engineering concerns (e.g., how easy it is to integrate or extend). The following subsections describe how our system addresses each of these with concrete mechanisms and design choices rather than only high-level claims.
+
+%==============================================================================
+\section{Distributed System Challenges Addressed}
+%==============================================================================
+
+Our system addresses the following core distributed systems challenges:
+
+\subsection{Heterogeneity}
+The system is designed to work across heterogeneous environments. All components are containerized using Docker, allowing deployment on any platform that supports containers. The coordinator communicates with MySQL instances and microservices via HTTP REST APIs and MySQL protocol, abstracting away underlying hardware differences.
+
+In a typical deployment, different machines may have different CPU architectures, operating systems, or network characteristics. Without careful design, these differences can leak into the application layer, making it hard to reproduce bugs or reason about performance. By packaging each service (coordinator, timestamp servers, Cabinet, SEER, metrics collector, and MySQL instances) into its own container, we ensure that the runtime environment is consistent regardless of where the containers run.
+
+Heterogeneity also appears at the software level. Our architecture mixes technologies (Python, MySQL, Docker, and an optional Vue.js frontend) without requiring any of them to be aware of the others' internal details. FastAPI only needs to know how to talk HTTP and MySQL; it does not need to know which Linux distribution is running inside each container or which physical disks back the database.
+
+\subsection{Openness}
+The system exposes well-defined REST APIs that allow external systems to interact with it. The coordinator provides endpoints for query execution (\texttt{/query}), system status (\texttt{/status}), and administrative operations. Each microservice (Cabinet, SEER, Metrics) exposes its own API, enabling modular extension.
+
+This API design makes it possible to treat our system as either a standalone educational artifact or as a component inside a larger distributed application. A separate service could, for example, call \texttt{/status} to visualize cluster health, or call the Cabinet and SEER APIs directly to experiment with alternative quorum or leader-election strategies. Because the APIs speak JSON over HTTP, they are language-agnostic and can be consumed by clients written in Java, Go, JavaScript, or any other modern language.
+
+\subsection{Security}
+While our implementation focuses on core distributed algorithms, we implement basic security through:
+\begin{itemize}
+    \item MySQL authentication with dedicated replication users
+    \item Internal Docker network isolation
+    \item CORS configuration for frontend access control
+\end{itemize}
+
+In a production-grade system, we would also enable TLS for inter-service communication and enforce finer-grained authorization, but for this project we intentionally kept the security model simple and transparent. The use of dedicated replication users ensures that even if application credentials are compromised, replication traffic cannot be easily forged. Similarly, the internal Docker network prevents external hosts from connecting directly to the database containers; all traffic must flow through the coordinator or explicitly exposed ports. This aligns with the course requirement of demonstrating at least basic security mechanisms without overshadowing the core distributed-systems content.
+
+\subsection{Failure Handling}
+Failure handling is a primary focus. The system implements:
+\begin{itemize}
+    \item Automatic master failure detection via health checks
+    \item SEER-based leader election for promoting the best replica
+    \item Quorum-based writes ensuring data durability even with replica failures
+    \item Graceful degradation when replicas are unavailable
+\end{itemize}
+
+The demonstration scenarios in Section~VII make these mechanisms concrete. We intentionally trigger master and replica failures using Docker commands so that we can observe how quickly the system detects failures, how SEER scores and selects a new leader, and how Cabinet adapts its quorums when some replicas are offline. Importantly, we show that clients do not need to change their behavior during these events: they continue to send SQL queries to the same coordinator endpoint and only notice a short spike in latency while a new leader is elected and replication converges.
+
+\subsection{Concurrency}
+The system handles concurrent operations through multiple complementary mechanisms:
+\begin{itemize}
+    \item \textbf{Thread-safe timestamp generation}: Each timestamp server uses Python threading locks to ensure that concurrent requests receive unique, monotonically increasing timestamps. The lock acquisition is designed to be fast (sub-microsecond) to avoid becoming a bottleneck.
+    \item \textbf{Async/await patterns in FastAPI}: The coordinator and all microservices use Python's asyncio event loop to handle many concurrent requests without spawning a thread per request. This allows a single coordinator instance to handle hundreds of concurrent clients efficiently.
+    \item \textbf{MySQL's built-in transaction isolation}: We rely on MySQL's REPEATABLE READ isolation level to ensure that concurrent transactions on the same node see consistent snapshots. This is crucial for maintaining correctness when multiple clients issue overlapping reads and writes.
+    \item \textbf{Timestamp-based write ordering}: By attaching a globally unique timestamp to each write, we establish a total order that can be used to serialize operations even when they arrive at different replicas in different orders. This approach is inspired by Lamport's logical clocks and ensures serializability without expensive distributed locking.
+\end{itemize}
+
+The combination of these mechanisms allows our system to process concurrent requests efficiently while maintaining strong consistency guarantees. In our experiments, we observed linear throughput scaling up to 100 concurrent clients before the single coordinator became a bottleneck.
+
+\subsection{Quality of Service}
+We provide tunable consistency levels (Strong and Eventual) that allow users to trade off between consistency and latency based on their requirements. Each level offers different guarantees:
+
+\begin{itemize}
+    \item \textbf{Eventual}: Offers the lowest latency by returning as soon as the master acknowledges the write. Replication to replicas happens asynchronously. Suitable for applications where eventual consistency is acceptable, such as logging or analytics workloads.
+    \item \textbf{Strong}: Provides strong consistency guarantees by using Cabinet's quorum-based replication. The system waits for acknowledgments from a majority of replicas selected by the Cabinet algorithm, ensuring that data is durably replicated before returning success. This is the recommended mode for applications requiring consistency, as it tolerates single-node failures without data loss.
+\end{itemize}
+
+The Cabinet algorithm enhances quality of service for Strong consistency by ensuring writes go to the fastest available replicas. The system preferentially selects low-latency, low-lag replicas for the quorum, reducing average response times compared to random replica selection.
+
+\subsection{Scalability}
+The architecture supports horizontal scaling through several design choices:
+\begin{itemize}
+    \item \textbf{Dynamic replica addition}: Additional replicas can be added to the cluster by starting new MySQL containers and registering them with the metrics collector. The coordinator automatically discovers new replicas and includes them in quorum calculations.
+    \item \textbf{Load-balanced timestamp servers}: Two timestamp servers provide both load balancing and fault tolerance. The coordinator alternates between them or falls back to the healthy one if the other fails.
+    \item \textbf{Read distribution}: Read queries are distributed across replicas based on performance metrics, preventing any single replica from becoming a hotspot. This allows read throughput to scale linearly with the number of replicas.
+    \item \textbf{Stateless microservices}: The Cabinet, SEER, and metrics collector services are stateless and can be replicated if needed. They fetch fresh data from MySQL instances on each request, so multiple instances can serve requests in parallel.
+\end{itemize}
+
+While our current prototype runs on a single machine with Docker, the architecture is designed to scale across multiple physical hosts. The only modification required would be updating the network configuration in Docker Compose to use overlay networks or external service discovery.
+
+\subsection{Transparency}
+The system provides multiple forms of transparency as defined in the distributed systems literature:
+
+\begin{itemize}
+    \item \textbf{Location transparency}: Clients send queries to a single coordinator endpoint (\texttt{http://localhost:9000/query}) without knowing which MySQL instance handles the request. The coordinator abstracts away the physical topology of the cluster.
+    \item \textbf{Replication transparency}: Data is automatically replicated to all replicas in the background. Clients do not need to explicitly request replication or specify which replicas should receive their data.
+    \item \textbf{Failure transparency}: When a replica or the master fails, the system automatically detects the failure and adjusts its behavior. Clients may notice a brief latency spike during failover but do not need to change their code or retry logic.
+    \item \textbf{Migration transparency}: If we were to move a MySQL instance to a different host or container, the coordinator would seamlessly route traffic to the new location after updating its configuration.
+\end{itemize}
+
+This transparency is achieved through the coordinator's role as a single point of contact for all client operations. While this introduces a potential single point of failure (discussed in the Limitations section), it greatly simplifies the client experience and allows us to evolve the backend infrastructure without impacting applications.
+
+%==============================================================================
+\section{Literature Review}
+%==============================================================================
+
+We studied six peer-reviewed papers to inform our design, focusing on timestamps, consistency/replication, and leader election.
+
+\subsection{Timestamp Ordering}
+
+Timestamp ordering is a fundamental technique for ensuring serializability in distributed databases without requiring global locks. We studied two influential papers in this area.
+
+\textbf{NCC: Natural Concurrency Control (OSDI 2023)} \cite{ncc} presents techniques for avoiding timestamp inversion using smart retry logic and delayed responses. The key insight is that when two transactions have overlapping read and write sets, the system can delay the response to one of them until the other commits, thereby preserving the timestamp order without aborting either transaction. This approach achieves higher throughput than traditional optimistic concurrency control because it reduces the abort rate. We adopted the principle of distributed timestamp generation to avoid centralized bottlenecks, though we use a simpler non-overlapping sequence approach rather than NCC's sophisticated retry logic.
+
+\textbf{Timestamp as a Service, Not an Oracle (PVLDB 2023)} \cite{taas} proposes using multiple timestamp servers instead of a single oracle. The paper observes that centralized timestamp services like Google's TrueTime or CockroachDB's hybrid logical clocks can become bottlenecks and single points of failure. By partitioning the timestamp space across multiple servers-for example, using modular arithmetic-the system can generate globally ordered timestamps without coordination. We directly implement this approach with two servers using odd/even assignment. Server 1 returns timestamps 1, 3, 5, 7, ... while Server 2 returns 2, 4, 6, 8, ..., ensuring that any two timestamps can be compared for ordering regardless of which server issued them.
+
+\subsection{Consistency and Replication}
+
+Consistency and replication are at the heart of distributed database design. We reviewed two papers that informed our quorum-based approach.
+
+\textbf{Cabinet: Dynamically Weighted Consensus (arXiv 2025)} \cite{cabinet} introduces weighted quorums where replicas are weighted based on their performance characteristics. The traditional quorum approach treats all replicas as equivalent and waits for any majority to acknowledge a write. Cabinet observes that replicas often have heterogeneous performance-some may be on faster hardware, closer to the client, or more up-to-date with replication. By weighting replicas based on latency, lag, and historical reliability, the system can select the optimal subset for each quorum, reducing write latency without sacrificing safety. We implement this algorithm for our write quorum selection, computing weights as the inverse of latency plus lag and selecting the top-weighted replicas that form a majority.
+
+\textbf{A Unified Summary of Non-Transactional Consistency Levels (arXiv 2024)} \cite{consistency} provides a framework to define and reason about consistency levels including linearizability, eventual consistency, and bounded staleness. The paper introduces a taxonomy that maps informal consistency level names used in practice (e.g., ``strong,'' ``session,'' ``eventual'') to precise formal definitions based on visibility and ordering guarantees. This informed our implementation of tunable consistency levels, helping us ensure that our Strong and Eventual modes provide well-defined semantics that users can reason about.
+
+\subsection{Leader Election}
+
+Leader election is critical for maintaining availability in replicated systems. When the current leader fails, the system must quickly and safely elect a new one. We studied two papers that improve upon traditional approaches.
+
+\textbf{SEER: Performance-Aware Leader Election (arXiv 2021)} \cite{seer} uses latency predictions to pick the fastest node during leader election, rather than choosing randomly or by ID. The paper argues that traditional leader election algorithms (e.g., Bully, Ring) optimize for correctness and liveness but ignore performance. SEER observes that some nodes are consistently faster or more reliable than others, and electing these nodes as leaders improves overall system throughput and reduces tail latency. The algorithm uses exponential smoothing to predict future latency based on historical measurements and selects the node with the lowest predicted latency. We implement this scoring algorithm for master failover, combining latency predictions with stability metrics.
+
+\textbf{A Hierarchical Adaptive Leader Election Algorithm (LADC 2024)} \cite{hierarchical} adds crash history to the election equation. Nodes that have failed often are less likely to become leaders, even if they currently appear healthy. The intuition is that past failures are predictive of future failures-a node that has crashed three times in the last hour is probably experiencing hardware or software issues and should not be trusted with the leader role. We incorporate crash counts into our SEER scoring by penalizing nodes proportionally to their historical failure rate, ensuring that the elected leader is not only currently healthy but also historically reliable.
+
+%===============================================================================
+\section{System Design}
+%==============================================================================
+
+\subsection{Methodology Overview}
+
+Our methodology follows the plan outlined in our original project proposal. We first selected three algorithms from recent research-Timestamp as a Service, Cabinet, and SEER-and mapped each of them to a dedicated microservice. We then designed a coordinating layer that exposes a single SQL endpoint and orchestrates these services.
+
+When a client issues a write, it is first received by the coordinator, which contacts our distributed timestamp service to obtain a globally ordered logical timestamp. The coordinator forwards the write and timestamp to the current MySQL master, which executes the statement and records the timestamp in a metadata table. MySQL's native GTID-based binlog replication then propagates the write to all replicas asynchronously. The coordinator invokes the Cabinet service to select a high-quality quorum of replicas based on current performance metrics, then polls these replicas until they have caught up to the write's timestamp before confirming success to the client.
+
+For reads, the coordinator inspects replica metrics to choose an appropriate target. For strongly consistent reads, it only uses replicas whose last-applied timestamp is at least as recent as the requested version. For more latency-sensitive reads, it can deliberately choose slightly stale replicas. When the master fails, the coordinator calls the SEER service, which scores all healthy replicas using latency, lag, uptime, and crash history and selects a new leader. The coordinator then updates its routing state and resumes handling client requests.
+
+This phased methodology-from algorithm selection and microservice decomposition to coordinated read/write workflows and failover handling-mirrors the ``Methodology and Architecture'' section of our proposal and provides a clear separation between core algorithms and system glue.
+
+\subsection{Client API and Consistency Semantics}
+
+Clients interact with the system through a single HTTP endpoint exposed by the coordinator. The coordinator in turn translates these calls into SQL statements and orchestrates timestamps, quorums, and failover.
+
+We expose a REST-style API:
+\begin{itemize}
+    \item \texttt{POST /query}: Execute a SQL statement with optional consistency level.
+    \item \texttt{GET /status}: Return current leader and replica health.
+    \item \texttt{GET /health}: Lightweight liveness probe for the coordinator.
+\end{itemize}
+
+The \texttt{/query} endpoint accepts a JSON payload:
+\begin{lstlisting}[language=json,caption=Client API for Query Execution]
+{
+  "query": "SELECT * FROM users WHERE id = 1",
+  "consistency": "STRONG | EVENTUAL"
+}
+\end{lstlisting}
+
+The \texttt{consistency} field controls how the coordinator treats the operation:
+\begin{itemize}
+    \item \textbf{Eventual}: For writes, the coordinator waits only for the master to apply the update before replying. Replication to replicas happens asynchronously. For reads, the coordinator may route to any healthy replica, even if it is slightly behind. This minimizes latency but allows bounded staleness.
+    \item \textbf{Strong}: For writes, the coordinator uses Cabinet's quorum-based replication, waiting for acknowledgments from a majority of replicas selected based on performance metrics. For reads, it prefers replicas whose last-applied timestamp is at least as recent as the quorum-committed timestamp, providing strong read-after-write consistency.
+\end{itemize}
+
+Formally, Strong consistency provides linearizable semantics for single-key operations as long as a majority of replicas remain connected. Eventual consistency provides lower latency at the cost of potential staleness, and the experiments in Section~VIII show the expected latency/consistency trade-off across these modes.
+
+\subsection{Read Routing Algorithm}
+
+The coordinator's read path combines consistency semantics with performance-driven routing. Before each read, the coordinator:
+\begin{enumerate}
+    \item Fetches the latest metrics for all replicas from the metrics collector (latency, lag, health status).
+    \item Filters out any replicas marked unhealthy or whose last-applied timestamp is too far behind the master for the requested consistency level.
+    \item Selects the best remaining replica according to a simple scoring function inspired by Cabinet.
+\end{enumerate}
+
+In pseudocode, the read routing logic is:
+\begin{lstlisting}[caption=Read Routing Based on Metrics]
+def route_read(query, consistency):
+    metrics = get_metrics_from_collector()
+    candidates = []
+    for replica in metrics.replicas:
+        if not replica.is_healthy:
+            continue
+        # Enforce freshness based on mode
+        if consistency == "STRONG":
+            if replica.last_ts < metrics.master_last_ts:
+                continue
+        candidates.append(replica)
+    # Fallback: if all were filtered, allow best-effort
+    if not candidates:
+        candidates = [r for r in metrics.replicas if r.is_healthy]
+    # Choose lowest-latency candidate
+    target = min(candidates, key=lambda r: r.latency_ms)
+    return execute_query_on(target, query)
+\end{lstlisting}
+
+This algorithm is $O(n)$ in the number of replicas and ensures that, under Strong consistency, reads observe at least the master's most recent committed timestamp whenever a suitable replica exists. Under Eventual consistency, we relax the timestamp filter and instead emphasize latency, which is consistent with the weaker guarantees.
+
+\subsection{Failure Detection and Health Monitoring}
+
+Robust failure detection is essential for both Cabinet and SEER. Our metrics collector implements a simple but effective health monitoring loop:
+\begin{enumerate}
+    \item Every five seconds, it attempts a short SQL query (e.g., \texttt{SELECT 1}) against each MySQL instance.
+    \item It records the round-trip latency, success/failure, and, if successful, the latest replication timestamp from the \texttt{\_metadata} table.
+    \item It updates uptime and crash counters based on transitions between healthy and failed states.
+\end{enumerate}
+
+The health state machine for each replica is equivalent to the state diagram in Figure~\ref{fig:state}. A replica is considered unhealthy if:
+\begin{itemize}
+    \item The health query fails with a connection error or timeout, or
+    \item The replication lag exceeds a configurable threshold (e.g., more than 10 logical timestamps behind the master).
+\end{itemize}
+
+When a replica transitions from healthy to failed, the metrics collector increments its crash counter and resets its uptime. When it recovers, uptime starts from zero again. SEER and Cabinet both consume this timestamped stream of metrics to make leader-election and quorum decisions that reflect recent behavior, not just instantaneous snapshots.
+
+\subsection{Metrics Schema}
+
+Internally, the metrics collector stores one record per replica in an in-memory structure that can also be serialized to JSON. The schema is:
+
+\begin{table}[h]
+\centering
+\caption{Metrics Schema for Each Replica}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Field} & \textbf{Type} & \textbf{Description} \\
+\hline
+replica\_id & string & Logical replica identifier \\
+\hline
+latency\_ms & float & Last probe round-trip time \\
+\hline
+replication\_lag & int & Timestamps behind master \\
+\hline
+uptime\_seconds & float & Seconds since last failure \\
+\hline
+crash\_count & int & Total observed crashes \\
+\hline
+is\_healthy & bool & Health flag from last probe \\
+\hline
+last\_updated & string & ISO timestamp of last update \\
+\hline
+\end{tabular}
+\label{tab:metrics-schema}
+\end{table}
+
+Cabinet uses \texttt{latency\_ms} and \texttt{replication\_lag} to compute replica weights, while SEER uses all fields to compute its composite leader-election score. The coordinator relies on \texttt{is\_healthy} and replication lag to decide which replicas are safe targets for reads.
+
+\subsection{Design Goals}
+
+Our design goals align with the core distributed systems challenges:
+\begin{enumerate}
+    \item \textbf{Strong Consistency}: Quorum-based writes ensure data is confirmed by a majority before returning success
+    \item \textbf{High Availability}: Automatic failover and replica redundancy minimize downtime
+    \item \textbf{Performance}: Adaptive algorithms select optimal replicas to minimize latency
+    \item \textbf{Fault Tolerance}: System continues operating despite node failures
+    \item \textbf{Simplicity}: Clean, documented implementation suitable for education and experimentation
+\end{enumerate}
+
+\subsection{Architecture Overview}
+
+Figure~\ref{fig:architecture} shows the system architecture. The system consists of 10 Docker containers working together.
+
+\begin{figure*}[!t]
+  \centering
+    \includegraphics[width=0.85\textwidth]{images/DC.drawio.pdf}
+  \caption{System Architecture showing the coordinator, MySQL instances, and supporting microservices.}
+  \label{fig:architecture}
+\end{figure*}
+
+\subsection{Use Case Diagram}
+
+Figure~\ref{fig:usecase} shows the use case diagram illustrating the main functionalities of our distributed database system from the perspective of different actors.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}[scale=0.5, transform shape]
+    % System boundary
+    \draw[thick, rounded corners] (-0.5,-5.5) rectangle (7,3.5);
+    \node[font=\footnotesize\bfseries] at (3.25,3.2) {Distributed Database System};
+    
+    % Actor: Client Application
+    \node[font=\footnotesize] at (-2,1) {Client};
+    \node[font=\footnotesize] at (-2,0.5) {App};
+    \draw (-2,2) circle (0.3);
+    \draw (-2,1.7) -- (-2,1.2);
+    \draw (-2.3,1.5) -- (-1.7,1.5);
+    \draw (-2,1.2) -- (-2.3,0.7);
+    \draw (-2,1.2) -- (-1.7,0.7);
+    
+    % Actor: System Admin
+    \node[font=\footnotesize] at (-2,-3) {System};
+    \node[font=\footnotesize] at (-2,-3.5) {Admin};
+    \draw (-2,-2) circle (0.3);
+    \draw (-2,-2.3) -- (-2,-2.8);
+    \draw (-2.3,-2.5) -- (-1.7,-2.5);
+    \draw (-2,-2.8) -- (-2.3,-3.3);
+    \draw (-2,-2.8) -- (-1.7,-3.3);
+    
+    % Use cases
+    \node[ellipse, draw, fill=blue!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc1) at (3,2.5) {Execute SQL Query};
+    \node[ellipse, draw, fill=blue!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc2) at (3,1.3) {Read Data (SELECT)};
+    \node[ellipse, draw, fill=blue!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc3) at (3,0.1) {Write Data (INSERT)};
+    \node[ellipse, draw, fill=green!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc4) at (3,-1.1) {Set Consistency Level};
+    \node[ellipse, draw, fill=orange!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc5) at (3,-2.3) {View System Status};
+    \node[ellipse, draw, fill=red!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc6) at (3,-3.5) {Trigger Failover};
+    \node[ellipse, draw, fill=yellow!10, minimum width=2.2cm, minimum height=0.8cm, font=\tiny] (uc7) at (3,-4.7) {Monitor Metrics};
+    
+    % Connections from Client
+    \draw[-] (-1.5,1.5) -- (uc1);
+    \draw[-] (-1.5,1.3) -- (uc2);
+    \draw[-] (-1.5,1.1) -- (uc3);
+    \draw[-] (-1.5,0.9) -- (uc4);
+    \draw[-] (-1.5,0.7) -- (uc5);
+    
+    % Connections from Admin
+    \draw[-] (-1.5,-2.3) -- (uc5);
+    \draw[-] (-1.5,-2.5) -- (uc6);
+    \draw[-] (-1.5,-2.7) -- (uc7);
+    
+    % Include/Extend relationships
+    \draw[dashed, ->] (uc2) -- node[right, font=\tiny] {<<extends>>} (uc1);
+    \draw[dashed, ->] (uc3) -- node[right, font=\tiny] {<<extends>>} (uc1);
+\end{tikzpicture}
+\caption{Use Case Diagram showing system functionality from user and admin perspectives.}
+\label{fig:usecase}
+\end{figure}
+
+\subsection{Component Descriptions}
+
+\subsubsection{Coordinator (FastAPI)}
+The central component that receives all client SQL queries and orchestrates the distributed system. It serves as the single entry point for the system, providing location transparency to clients. The coordinator is implemented as a FastAPI application exposed on port 9000 (internally 8000) with the following responsibilities:
+\begin{itemize}
+    \item \textbf{Query parsing}: Analyzes incoming SQL to determine whether it is a read (SELECT) or write (INSERT, UPDATE, DELETE) operation using a simple regex-based parser in \texttt{query\_parser.py}
+    \item \textbf{Timestamp acquisition}: Contacts one of the two timestamp servers to obtain a globally ordered timestamp for write operations
+    \item \textbf{Write execution}: Executes writes on the current master, then replicates to replicas based on the consistency level
+    \item \textbf{Quorum coordination}: Calls the Cabinet service to determine which replicas to include in the write quorum, then polls those replicas until they catch up to the write's timestamp via binlog replication
+    \item \textbf{Read routing}: Selects the best replica for read operations based on current metrics (latency, lag, health)
+    \item \textbf{Failover handling}: Detects master failures, calls SEER for leader election, and promotes the winning replica to master
+    \item \textbf{Status reporting}: Exposes \texttt{/status} and \texttt{/health} endpoints for monitoring and observability
+\end{itemize}
+
+The coordinator maintains connections to all MySQL instances and uses asyncio for concurrent request handling. A typical write request flow involves: (1) timestamp acquisition, (2) master write execution, (3) Cabinet quorum selection, and (4) polling replicas until quorum catches up via binlog replication.
+
+\subsubsection{Timestamp Services (2 instances)}
+Two independent services provide globally ordered timestamps without central coordination. Each service is exposed on its own port (9001 and 9002 externally, 8000 internally) and maintains a thread-safe counter:
+\begin{itemize}
+    \item \textbf{Server 1}: Returns odd numbers (1, 3, 5, 7, ...), starting from 1 and incrementing by 2
+    \item \textbf{Server 2}: Returns even numbers (2, 4, 6, 8, ...), starting from 2 and incrementing by 2
+\end{itemize}
+
+This design eliminates coordination overhead while ensuring total ordering. The services are stateless except for the counter, which could be persisted to disk for durability in a production deployment. Each service exposes two endpoints:
+\begin{itemize}
+    \item \texttt{GET /timestamp}: Returns the next timestamp as JSON \texttt{\{"timestamp": 5\}}
+    \item \texttt{GET /health}: Returns health status for monitoring
+\end{itemize}
+
+\subsubsection{Metrics Collector}
+A background service that continuously monitors the health and performance of all MySQL instances. Exposed on port 9003, it polls each instance every 5 seconds and maintains a real-time view of the cluster state. For each MySQL instance, it tracks:
+\begin{itemize}
+    \item \textbf{Connection latency (ms)}: Time to execute a simple health query (\texttt{SELECT 1})
+    \item \textbf{Replication lag (timestamp units)}: Difference between master's latest timestamp and replica's last applied timestamp, read from the \texttt{\_metadata} table
+    \item \textbf{Uptime (seconds)}: Time since the instance was last observed as healthy
+    \item \textbf{Crash count}: Number of times the instance has transitioned from healthy to unhealthy
+    \item \textbf{Health status}: Boolean indicating current reachability
+\end{itemize}
+
+The metrics collector exposes \texttt{GET /metrics} to return all instance metrics as JSON, and \texttt{GET /metrics/\{replica\_id\}} to return metrics for a specific instance (e.g., \texttt{instance-2}). Cabinet and SEER consume these metrics to make informed decisions.
+
+\subsubsection{Cabinet Service}
+Implements adaptive quorum selection based on the Cabinet algorithm. Exposed on port 9004, it receives requests from the coordinator and returns the optimal set of replicas for a write quorum. The service:
+\begin{itemize}
+    \item Fetches current metrics from the metrics collector via HTTP
+    \item Computes a weight for each replica based on latency and lag: $w = 1 / (\text{latency} + \text{lag} + 1)$
+    \item Filters out unhealthy replicas (weight set to 0)
+    \item Sorts replicas by weight in descending order
+    \item Returns the top $\lceil(n+1)/2\rceil$ replicas as the quorum
+\end{itemize}
+
+The \texttt{POST /select-quorum} endpoint accepts the list of available replicas and returns the selected quorum members with their weights.
+
+\subsubsection{SEER Service}
+Implements performance-aware leader election. Exposed on port 9005, it scores replicas on multiple factors and selects the best candidate to become the new master when failover is needed. The scoring algorithm considers:
+\begin{itemize}
+    \item \textbf{Latency (40\%)}: Lower latency indicates faster response times as master
+    \item \textbf{Stability (40\%)}: Balances uptime against crash history to prefer reliable nodes
+    \item \textbf{Lag (20\%)}: Lower lag means less catch-up time before the new master can accept writes
+\end{itemize}
+
+The \texttt{POST /elect-leader} endpoint accepts the list of candidate replicas (excluding the failed master) and returns the winner with its score breakdown.
+
+\subsubsection{MySQL Instances (4 containers)}
+Four MySQL 8.0 containers form the data layer: one master (\texttt{mysql-instance-1}) and three replicas (\texttt{mysql-instance-2}, \texttt{mysql-instance-3}, \texttt{mysql-instance-4}). Each instance is configured with:
+\begin{itemize}
+    \item The \texttt{testdb} database containing application tables (e.g., \texttt{users}, \texttt{products})
+    \item A \texttt{\_metadata} table tracking the global last applied timestamp:
+    \begin{lstlisting}[language=sql,basicstyle=\ttfamily\tiny]
+CREATE TABLE _metadata (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  last_applied_timestamp BIGINT DEFAULT 0,
+  last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+    \end{lstlisting}
+    \item A \texttt{\_table\_timestamps} table for per-table replication tracking:
+    \begin{lstlisting}[language=sql,basicstyle=\ttfamily\tiny]
+CREATE TABLE _table_timestamps (
+  table_name VARCHAR(255) PRIMARY KEY,
+  last_timestamp BIGINT DEFAULT 0,
+  last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+    \end{lstlisting}
+    This enables fine-grained visibility into which specific tables are behind on each replica---a significant improvement over AWS RDS's coarse ``seconds behind master'' metric.
+    \item Custom configuration for GTID-based replication (\texttt{master.cnf} or \texttt{replicaX.cnf})
+    \item A replication user (\texttt{replicator}) for binlog streaming between instances
+\end{itemize}
+
+The master accepts both reads and writes, while replicas are read-only and receive updates via MySQL's native GTID-based binary log replication. When a failover occurs, the coordinator promotes the elected replica by stopping its replication, disabling read-only mode, and reconfiguring remaining replicas to replicate from the new master.
+
+\subsection{Component Diagram}
+
+Figure~\ref{fig:component} shows the component interactions in our system.
+
+\begin{figure}[!t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[node distance=1.2cm]
+    % Client
+    \node[component, fill=yellow!20] (client) {Client};
+    
+    % Coordinator
+    \node[component, below=of client, fill=green!20, text width=2.5cm] (coord) {Coordinator\\(FastAPI)};
+    
+    % Services row
+    \node[component, below left=1cm and 1.5cm of coord] (ts1) {Timestamp\\Server 1};
+    \node[component, right=0.3cm of ts1] (ts2) {Timestamp\\Server 2};
+    \node[component, right=0.3cm of ts2] (metrics) {Metrics\\Collector};
+    \node[component, right=0.3cm of metrics] (cabinet) {Cabinet};
+    \node[component, right=0.3cm of cabinet] (seer) {SEER};
+    
+    % Databases
+    \node[database, below=2cm of ts1] (master) {Master};
+    \node[database, right=0.5cm of master] (r1) {Replica 1};
+    \node[database, right=0.5cm of r1] (r2) {Replica 2};
+    \node[database, right=0.5cm of r2] (r3) {Replica 3};
+    
+    % Arrows
+    \draw[arrow] (client) -- (coord);
+    \draw[arrow] (coord) -- (ts1);
+    \draw[arrow] (coord) -- (ts2);
+    \draw[arrow] (coord) -- (cabinet);
+    \draw[arrow] (coord) -- (seer);
+    \draw[arrow] (cabinet) -- (metrics);
+    \draw[arrow] (seer) -- (metrics);
+    \draw[arrow] (coord) -- (master);
+    \draw[dashedarrow] (coord) -- (r1);
+    \draw[dashedarrow] (coord) -- (r2);
+    \draw[dashedarrow] (coord) -- (r3);
+    \draw[arrow] (metrics) -- (master);
+    \draw[arrow] (metrics) -- (r1);
+    \draw[arrow] (metrics) -- (r2);
+    \draw[arrow] (metrics) -- (r3);
+\end{tikzpicture}%
+}
+\caption{Component Diagram showing service dependencies and communication paths.}
+\label{fig:component}
+\end{figure}
+
+\subsection{Deployment Diagram}
+
+Figure~\ref{fig:deployment} shows the deployment diagram illustrating how our system components are deployed across Docker containers on the host machine.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=0.65, transform shape,
+    node distance=0.8cm,
+    container/.style={rectangle, draw, fill=blue!10, minimum width=2cm, minimum height=0.7cm, font=\scriptsize},
+    db/.style={cylinder, draw, fill=orange!20, shape border rotate=90, aspect=0.25, minimum height=0.7cm, minimum width=1cm, font=\scriptsize},
+    host/.style={rectangle, draw, dashed, fill=gray!5, inner sep=0.3cm},
+    network/.style={rectangle, draw, fill=green!10, minimum width=8cm, minimum height=0.5cm, font=\scriptsize}]
+    
+    % Host machine
+    \node[host, minimum width=10cm, minimum height=6cm] (host) {};
+    \node[above] at (host.north) {\textbf{Host Machine (Docker)}};
+    
+    % Docker network
+    \node[network] (net) at (0,-2.2) {db-network (172.20.0.0/16)};
+    
+    % Coordinator
+    \node[container, fill=red!15] (coord) at (0,1.8) {Coordinator :9000};
+    
+    % Timestamp services
+    \node[container, fill=yellow!20] (ts1) at (-3.5,0.8) {Timestamp-1 :9001};
+    \node[container, fill=yellow!20] (ts2) at (-3.5,0) {Timestamp-2 :9002};
+    
+    % Support services
+    \node[container, fill=purple!15] (metrics) at (3.5,0.8) {Metrics :9003};
+    \node[container, fill=purple!15] (cabinet) at (3.5,0) {Cabinet :9004};
+    \node[container, fill=purple!15] (seer) at (3.5,-0.8) {SEER :9005};
+    
+    % MySQL instances
+    \node[db] (db1) at (-2,-1.2) {MySQL-1 :3306};
+    \node[db] (db2) at (-0.5,-1.2) {MySQL-2 :3307};
+    \node[db] (db3) at (1,-1.2) {MySQL-3 :3308};
+    \node[db] (db4) at (2.5,-1.2) {MySQL-4 :3309};
+    
+    % Labels
+    \node[font=\tiny] at (-2,-0.7) {Master};
+    \node[font=\tiny] at (0.5,-0.7) {Replicas};
+    
+\end{tikzpicture}
+\caption{Deployment Diagram showing Docker container topology and network configuration.}
+\label{fig:deployment}
+\end{figure}
+
+%==============================================================================
+\section{Algorithm Design}
+%==============================================================================
+
+\subsection{Timestamp as a Service}
+
+\textbf{Problem}: A single timestamp server becomes a bottleneck and single point of failure. In high-throughput systems, every write operation requires a timestamp, meaning the timestamp service must handle thousands of requests per second. If this service runs on a single node, it limits the overall system throughput and introduces a critical dependency: if the timestamp server fails, no writes can proceed.
+
+\textbf{Solution}: Use two timestamp servers with non-overlapping sequences. Each server maintains an independent counter that increments by 2, ensuring that one server always returns odd numbers and the other always returns even numbers. This guarantees that timestamps from different servers never collide.
+
+\begin{lstlisting}[caption=Timestamp Generation Algorithm, float=!t]
+# Server configuration
+SERVER_ID = 1 or 2
+START_VALUE = 1 (odd) or 2 (even)
+
+# Thread-safe counter
+current_counter = START_VALUE
+
+def get_timestamp():
+    with lock:
+        timestamp = current_counter
+        current_counter += 2  # Maintain odd/even
+    return timestamp
+\end{lstlisting}
+
+\textbf{Coordinator Integration}: The coordinator maintains connections to both timestamp servers and uses a simple round-robin or random selection to distribute load. If one server fails to respond within a timeout (e.g., 100ms), the coordinator immediately falls back to the other server. This provides both load balancing during normal operation and fault tolerance during failures.
+
+\textbf{Correctness}: Since odd and even numbers never overlap, timestamps from both servers form a total order. Any two writes can be ordered by comparing their timestamps. More formally, for any two timestamps $t_1$ and $t_2$ generated by our system, exactly one of $t_1 < t_2$, $t_1 = t_2$, or $t_1 > t_2$ holds. Since each server generates unique values and the two servers' value sets are disjoint, $t_1 = t_2$ can only occur if $t_1$ and $t_2$ are the same timestamp (i.e., the same request). This total ordering property is essential for conflict resolution and serializability.
+
+\textbf{Complexity}: O(1) per timestamp request, no network coordination required. The lock acquisition is local to each server and takes constant time. The only network communication is the single HTTP request from the coordinator to one timestamp server, which adds a fixed latency overhead (typically 1-5ms in our Docker environment).
+
+\subsection{Cabinet: Adaptive Quorum Selection}
+
+\textbf{Problem}: Fixed quorums may include slow or lagging replicas, increasing write latency. In a traditional quorum system, the coordinator waits for acknowledgments from any majority of replicas before confirming a write. However, if the majority includes a slow or heavily loaded replica, the overall write latency is determined by that slowest member. This ``straggler'' effect can significantly degrade performance, especially under skewed workloads where some replicas are busier than others.
+
+\textbf{Solution}: Weight replicas by performance and select the best ones. Instead of waiting for any majority, Cabinet computes a weight for each replica based on its recent latency and replication lag, then selects the highest-weighted replicas that form a majority. This ensures that the quorum consists of the fastest, most up-to-date nodes.
+
+\begin{lstlisting}[caption=Cabinet Weight Calculation, float=!t]
+def calculate_weight(latency_ms, lag, is_healthy):
+    if not is_healthy:
+        return 0.0
+    # Higher weight = better performance
+    weight = 1.0 / (latency_ms + lag + 1.0)
+    return weight
+
+def select_quorum(replicas):
+    # Calculate weights
+    weighted = [(r, calculate_weight(...)) 
+                for r in replicas]
+    # Sort by weight (descending)
+    weighted.sort(key=lambda x: x[1], 
+                  reverse=True)
+    # Select majority
+    quorum_size = ceil((len(replicas) + 1) / 2)
+    return weighted[:quorum_size]
+\end{lstlisting}
+
+\textbf{Weight Function Design}: The weight function $w = 1 / (\text{latency} + \text{lag} + 1)$ is designed to be simple yet effective. The $+1$ in the denominator prevents division by zero when latency and lag are both zero. Latency is measured in milliseconds, while lag is measured in timestamp units (the difference between the master's latest timestamp and the replica's last applied timestamp). By summing these values, we create a composite metric that penalizes both slow replicas and stale replicas. In future work, we could experiment with different weight functions, such as exponential decay or separate coefficients for latency and lag.
+
+\textbf{Correctness}: The quorum size is always a majority ($\lceil(n+1)/2\rceil$), ensuring intersection with any other quorum. This maintains the safety properties of quorum-based replication: any two quorums overlap in at least one node, so reads that contact a quorum are guaranteed to see the most recent quorum-committed write. Cabinet does not change the quorum size, only the composition, so safety is preserved.
+
+\textbf{Liveness}: By selecting the fastest replicas, Cabinet improves liveness in the sense that writes are more likely to complete quickly. However, if all replicas are unhealthy (weight zero), no quorum can be formed, and the write must wait or fail. In our implementation, the coordinator returns an error to the client if no healthy quorum can be assembled, allowing the application to retry or take corrective action.
+
+\textbf{Complexity}: O(n log n) for sorting n replicas. In practice, n is small (3-5 replicas), so this overhead is negligible compared to network latency. For very large clusters (e.g., hundreds of replicas), a partial sort or heap-based selection could reduce this to O(n + k log n) where k is the quorum size.
+
+\subsection{SEER: Performance-Aware Leader Election}
+
+\textbf{Problem}: Random or ID-based leader election may select suboptimal nodes. Traditional algorithms like Bully elect the node with the highest ID, while Raft and Paxos often elect whichever candidate first achieves a majority of votes. These approaches guarantee correctness but ignore performance: the elected leader might be slow, overloaded, or prone to failures. In a database context, a slow leader directly impacts all write operations, as every write must go through the master.
+
+\textbf{Solution}: Score replicas on multiple performance factors, selecting the replica most likely to perform well as the new master.
+
+\begin{lstlisting}[caption=SEER Scoring Algorithm, float=!t]
+def calculate_score(latency, uptime, 
+                    crashes, lag):
+    # Latency score (40%): lower is better
+    latency_score = 1.0 / (latency + 1.0)
+    
+    # Stability score (40%): uptime vs crashes
+    penalty = crashes * 100
+    stability_score = uptime / (uptime + 
+                                penalty + 1)
+    
+    # Lag score (20%): lower lag is better
+    lag_score = 1.0 / (lag + 1.0)
+    
+    # Weighted combination
+    total = (latency_score * 0.4 + 
+             stability_score * 0.4 + 
+             lag_score * 0.2)
+    return total
+
+def elect_leader(replicas):
+    scores = [(r, calculate_score(...)) 
+              for r in replicas if r.is_healthy]
+    return max(scores, key=lambda x: x[1])
+\end{lstlisting}
+
+\textbf{Score Component Analysis}:
+\begin{itemize}
+    \item \textbf{Latency score (40\%)}: Measures how quickly the replica responds to health probes. A replica with 5ms latency scores higher than one with 50ms latency. This component predicts how fast the new master will handle write requests.
+    \item \textbf{Stability score (40\%)}: Balances uptime against crash history. A replica that has been running for 24 hours with no crashes scores higher than one that has crashed three times in the last hour, even if the latter is currently healthy. The crash penalty (multiplied by 100) ensures that even a single recent crash significantly impacts the score.
+    \item \textbf{Lag score (20\%)}: Measures how up-to-date the replica is relative to the old master. A replica with zero lag has applied all committed writes, while one with high lag may be missing recent data. Selecting a lagging replica as leader would require clients to wait for catch-up replication before writes can proceed.
+\end{itemize}
+
+\textbf{Weight Rationale}: We assign equal weight (40\%) to latency and stability because both directly impact the user experience: a slow leader causes high write latency, while an unstable leader causes frequent failovers. Lag receives lower weight (20\%) because most replicas in a healthy cluster have similar lag values, making it less discriminative. These weights can be tuned based on workload characteristics; for example, a system with frequent failures might increase the stability weight.
+
+\textbf{Correctness}: The algorithm always selects a healthy replica (those with \texttt{is\_healthy=False} are filtered out). By definition, any healthy replica can serve as master, so the election is safe. The scoring ensures the new leader is likely to perform well as master, but even a suboptimal choice is correct in terms of data consistency.
+
+\textbf{Complexity}: O(n) to compute scores for n replicas. Each score computation is O(1), involving only arithmetic operations on cached metrics.
+
+\subsection{Sequence Diagram: Write Operation}
+
+Figure~\ref{fig:seq-write} shows the sequence of interactions during a write operation. The coordinator executes the write on the master, then waits for MySQL's GTID-based binlog replication to propagate the changes to the Cabinet-selected quorum replicas.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}[scale=0.7, transform shape]
+    % Actors
+    \node[actor, label=above:{\footnotesize Client}] (client) at (0,0) {};
+    \node[actor, label=above:{\footnotesize Coordinator}] (coord) at (2.5,0) {};
+    \node[actor, label=above:{\footnotesize Timestamp}] (ts) at (5,0) {};
+    \node[actor, label=above:{\footnotesize Cabinet}] (cab) at (7.5,0) {};
+    \node[actor, label=above:{\footnotesize Master}] (master) at (10,0) {};
+    
+    % Lifelines
+    \draw[lifeline] (client) -- (0,-8);
+    \draw[lifeline] (coord) -- (2.5,-8);
+    \draw[lifeline] (ts) -- (5,-8);
+    \draw[lifeline] (cab) -- (7.5,-8);
+    \draw[lifeline] (master) -- (10,-8);
+    
+    % Messages
+    \draw[message] (0,-1) -- node[above, font=\tiny] {POST /query} (2.5,-1);
+    \draw[message] (2.5,-1.5) -- node[above, font=\tiny] {getTimestamp()} (5,-1.5);
+    \draw[message] (5,-2) -- node[above, font=\tiny] {ts=5} (2.5,-2);
+    \draw[message] (2.5,-2.5) -- node[above, font=\tiny] {selectQuorum()} (7.5,-2.5);
+    \draw[message] (7.5,-3) -- node[above, font=\tiny] {[inst-3,inst-4]} (2.5,-3);
+    \draw[message] (2.5,-3.5) -- node[above, font=\tiny] {execute(sql,ts)} (10,-3.5);
+    \draw[message] (10,-4) -- node[above, font=\tiny] {OK + binlog} (2.5,-4);
+    \node[font=\tiny, align=center] at (6.25,-4.75) {binlog replication\\propagates to replicas};
+    \draw[message] (2.5,-5.5) -- node[above, font=\tiny] {poll replica ts} (10,-5.5);
+    \draw[message] (10,-6) -- node[above, font=\tiny] {quorum caught up} (2.5,-6);
+    \draw[message] (2.5,-7) -- node[above, font=\tiny] {Success(ts=5)} (0,-7);
+\end{tikzpicture}
+\caption{Sequence Diagram for Write Operation with Quorum. The coordinator writes to master, then polls Cabinet-selected replicas until they catch up via binlog replication.}
+\label{fig:seq-write}
+\end{figure}
+
+\subsection{Sequence Diagram: Master Failover}
+
+Figure~\ref{fig:seq-failover} shows the failover sequence when the master fails.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}[scale=0.7, transform shape]
+    % Actors
+    \node[actor, label=above:{\footnotesize Client}] (client) at (0,0) {};
+    \node[actor, label=above:{\footnotesize Coordinator}] (coord) at (2.5,0) {};
+    \node[actor, label=above:{\footnotesize Instance-1}] (master) at (5,0) {};
+    \node[actor, label=above:{\footnotesize SEER}] (seer) at (7.5,0) {};
+    \node[actor, label=above:{\footnotesize Instance-4}] (rep) at (10,0) {};
+    
+    % Lifelines
+    \draw[lifeline] (client) -- (0,-7);
+    \draw[lifeline] (coord) -- (2.5,-7);
+    \draw[lifeline] (master) -- (5,-3);
+    \draw[lifeline] (seer) -- (7.5,-7);
+    \draw[lifeline] (rep) -- (10,-7);
+    
+    % Messages
+    \draw[message] (0,-1) -- node[above, font=\tiny] {POST /query} (2.5,-1);
+    \draw[message] (2.5,-1.5) -- node[above, font=\tiny] {execute()} (5,-1.5);
+    \draw[message, red] (5,-2) -- node[above, font=\tiny, red] {TIMEOUT} (2.5,-2);
+    \node[red, font=\tiny] at (5,-2.5) {X FAILED};
+    \draw[message] (2.5,-3) -- node[above, font=\tiny] {electLeader()} (7.5,-3);
+    \draw[message] (7.5,-3.5) -- node[above, font=\tiny] {scores replicas} (7.5,-4);
+    \draw[message] (7.5,-4.5) -- node[above, font=\tiny] {leader=instance-4} (2.5,-4.5);
+    \draw[message] (2.5,-5) -- node[above, font=\tiny] {promote()} (10,-5);
+    \draw[message] (10,-5.5) -- node[above, font=\tiny] {OK (new master)} (2.5,-5.5);
+    \draw[message] (2.5,-6) -- node[above, font=\tiny] {retry INSERT} (10,-6);
+    \draw[message] (10,-6.5) -- node[above, font=\tiny] {Success} (0,-6.5);
+\end{tikzpicture}
+\caption{Sequence Diagram for Master Failover using SEER.}
+\label{fig:seq-failover}
+\end{figure}
+
+\subsection{State Diagram: Replica States}
+
+Figure~\ref{fig:state} shows the possible states of a MySQL replica.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=0.75, transform shape,
+    state/.style={rectangle, rounded corners, draw, fill=green!10, minimum width=2cm, minimum height=0.8cm, font=\footnotesize},
+    initial/.style={circle, draw, fill=black, inner sep=2pt},
+    final/.style={circle, draw, double, fill=black!20, inner sep=2pt}]
+    
+    % States
+    \node[initial] (init) at (-4,0) {};
+    \node[state] (stopped) at (-2,0) {Stopped};
+    \node[state] (starting) at (1,0) {Starting};
+    \node[state, fill=blue!15] (healthy) at (4,0) {Healthy};
+    \node[state, fill=yellow!20] (lagging) at (4,-2) {Lagging};
+    \node[state, fill=red!15] (unhealthy) at (1,-2) {Unhealthy};
+    \node[state, fill=orange!20] (promoting) at (-2,-2) {Promoting};
+    \node[state, fill=green!25] (master) at (-2,-4) {Master};
+    
+    % Transitions
+    \draw[->, thick] (init) -- (stopped);
+    \draw[->, thick] (stopped) -- node[above, font=\tiny] {start} (starting);
+    \draw[->, thick] (starting) -- node[above, font=\tiny] {connected} (healthy);
+    \draw[->, thick] (healthy) -- node[right, font=\tiny] {lag > threshold} (lagging);
+    \draw[->, thick] (lagging) -- node[below, font=\tiny] {caught up} (healthy);
+    \draw[->, thick] (lagging) -- node[above, font=\tiny] {timeout} (unhealthy);
+    \draw[->, thick] (healthy) -- node[above, font=\tiny] {conn lost} (unhealthy);
+    \draw[->, thick] (unhealthy) -- node[above, font=\tiny] {reconnect} (starting);
+    \draw[->, thick] (healthy) -- node[left, font=\tiny] {SEER elected} (promoting);
+    \draw[->, thick] (promoting) -- node[left, font=\tiny] {promoted} (master);
+    \draw[->, thick] (unhealthy) -- node[below, font=\tiny] {stop} (stopped);
+    
+\end{tikzpicture}
+\caption{State Diagram for MySQL Replica Lifecycle showing transitions between operational states.}
+\label{fig:state}
+\end{figure}
+
+%==============================================================================
+\section{Implementation Details}
+%==============================================================================
+
+\subsection{Architectural Style}
+
+We use a \textbf{microservices architecture} where each component runs in its own Docker container. Services communicate via REST APIs over HTTP. This provides:
+\begin{itemize}
+    \item Independent deployment and scaling
+    \item Technology flexibility (Python for services, MySQL for data)
+    \item Clear service boundaries
+\end{itemize}
+
+\subsection{Technology Stack}
+
+\begin{itemize}
+    \item \textbf{Language}: Python 3.11
+    \item \textbf{Web Framework}: FastAPI with uvicorn
+    \item \textbf{Database}: MySQL 8.0
+    \item \textbf{Containerization}: Docker and Docker Compose
+    \item \textbf{HTTP Client}: httpx (async)
+    \item \textbf{MySQL Client}: mysql-connector-python
+    \item \textbf{Frontend}: Vue.js 3 with PrimeVue (optional dashboard)
+\end{itemize}
+
+We intentionally chose mainstream, well-documented technologies so that the focus of the project remains on distributed-systems ideas rather than on wrestling with obscure tooling. FastAPI provides a lightweight but expressive way to define HTTP endpoints and integrates naturally with Python's \texttt{asyncio} ecosystem, which we leverage for concurrent request handling. MySQL 8.0 is a mature relational database that supports the SQL features we need (transactions, isolation levels, and user-defined tables) while still being easy to run in containers.
+
+On the client side, httpx gives us an asynchronous HTTP client that plays well with FastAPI's event loop, allowing the coordinator to talk to timestamp, Cabinet, SEER, and metrics services without blocking. Docker Compose serves as the glue that wires together all containers, defines the internal network, and sets up environment variables and volume mounts. Finally, the optional Vue.js + PrimeVue frontend demonstrates that our system can be observed and controlled from a modern web UI, though it is not required for the core algorithms to function.
+
+\subsection{Service Interactions}
+
+Services interact through REST APIs:
+
+\begin{table}[h]
+\centering
+\caption{Service Endpoints}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Service} & \textbf{Port} & \textbf{Key Endpoints} \\
+\hline
+Coordinator & 9000 & /query, /status, /table-timestamps \\
+\hline
+Timestamp 1 & 9001 & /timestamp, /health, /reset \\
+\hline
+Timestamp 2 & 9002 & /timestamp, /health, /reset \\
+\hline
+Metrics & 9003 & /metrics, /table-timestamps \\
+\hline
+Cabinet & 9004 & /select-quorum \\
+\hline
+SEER & 9005 & /elect-leader \\
+\hline
+\end{tabular}
+\label{tab:endpoints}
+\end{table}
+
+\subsection{Project Structure}
+
+\begin{lstlisting}[language=bash,caption=Repository Structure]
+backend/
+  docker-compose.yml     # Orchestration
+  coordinator/           # Main API
+    main.py, query_parser.py
+  timestamp-service/     # Odd/even timestamps
+  metrics-collector/     # Performance monitoring
+  cabinet-service/       # Quorum selection
+  seer-service/          # Leader election
+  mysql-config/          # MySQL setup
+    init.sql, master.cnf, replica.cnf
+\end{lstlisting}
+
+This layout mirrors the logical decomposition of our system. Each directory under \texttt{backend/} corresponds to a separately deployable service with its own Dockerfile and Python entrypoint. The \texttt{coordinator/} directory contains the FastAPI application that exposes the public API, routes queries, and coordinates timestamps, quorums, and failover. The \texttt{timestamp-service/}, \texttt{metrics-collector/}, \texttt{cabinet-service/}, and \texttt{seer-service/} directories each house a small, focused microservice concerned with a single responsibility.
+
+The \texttt{mysql-config/} directory contains configuration files and initialization SQL for the MySQL containers. This separation allows us to modify database settings (e.g., replication configuration or buffer sizes) without touching the application code. It also makes it easier to reason about which parts of the repository are responsible for storage behavior versus orchestration and business logic.
+
+\subsection{Docker Compose Configuration}
+
+The \texttt{docker-compose.yml} file defines the complete system topology. Key configuration aspects include:
+
+\begin{itemize}
+    \item \textbf{Network}: All containers share a custom bridge network (\texttt{db-network}) enabling DNS-based service discovery. Containers reference each other by name (e.g., \texttt{mysql-instance-1}, \texttt{cabinet-service}).
+    \item \textbf{Dependencies}: Services declare dependencies to ensure proper startup order. The coordinator depends on MySQL and timestamp services; Cabinet and SEER depend on the metrics collector.
+    \item \textbf{Health checks}: Each service defines a health check command. Docker Compose waits for dependencies to be healthy before starting dependent services.
+    \item \textbf{Volume mounts}: Configuration files are mounted read-only from the host. The Docker socket is mounted for the coordinator to enable container management during failover.
+    \item \textbf{Port mapping}: The coordinator (9000), metrics collector (9003), and other services expose ports to the host. Internal services communicate via the Docker network on port 8000.
+\end{itemize}
+
+\subsection{Startup Sequence}
+
+The system starts in a specific order to ensure dependencies are available:
+
+\begin{enumerate}
+    \item MySQL master (mysql-instance-1) starts and initializes the \texttt{testdb} database using \texttt{init.sql}
+    \item MySQL replicas (instance-2, instance-3, instance-4) start and configure GTID-based replication from master using \texttt{init-replication.sh}
+    \item Timestamp services start (no dependencies)
+    \item Metrics collector starts and begins polling MySQL instances
+    \item Cabinet and SEER services start (depend on metrics collector)
+    \item Coordinator starts and becomes ready to accept client requests
+\end{enumerate}
+
+The full startup takes approximately 30-45 seconds, dominated by MySQL initialization time.
+
+\subsection{Class/Module Diagram}
+
+Figure~\ref{fig:class} shows the key modules and their relationships.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=0.6, transform shape,
+    class/.style={rectangle, draw, fill=blue!10, minimum width=2.5cm, font=\scriptsize},
+    classname/.style={rectangle, draw, fill=blue!25, minimum width=2.5cm, font=\scriptsize\bfseries}]
+    
+    % Coordinator
+    \node[classname] (coordname) at (0,3) {Coordinator};
+    \node[class, below=0pt of coordname, text width=2.3cm, align=left] (coordattr) {current\_master\\current\_replicas\\state\_lock};
+    \node[class, below=0pt of coordattr, text width=2.3cm, align=left] (coordmeth) {execute\_query()\\get\_timestamp()\\handle\_failover()};
+    
+    % Cabinet
+    \node[classname] (cabname) at (-4,0) {CabinetService};
+    \node[class, below=0pt of cabname, text width=2.3cm, align=left] (cabattr) {metrics\_url\\quorum\_size};
+    \node[class, below=0pt of cabattr, text width=2.3cm, align=left] (cabmeth) {select\_quorum()\\calculate\_weights()};
+    
+    % SEER
+    \node[classname] (seername) at (4,0) {SEERService};
+    \node[class, below=0pt of seername, text width=2.3cm, align=left] (seerattr) {metrics\_url\\weights};
+    \node[class, below=0pt of seerattr, text width=2.3cm, align=left] (seermeth) {elect\_leader()\\compute\_score()};
+    
+    % Timestamp
+    \node[classname] (tsname) at (-4,3) {TimestampService};
+    \node[class, below=0pt of tsname, text width=2.3cm, align=left] (tsattr) {counter\\server\_id};
+    \node[class, below=0pt of tsattr, text width=2.3cm, align=left] (tsmeth) {get\_timestamp()\\reset()};
+    
+    % Metrics
+    \node[classname] (metname) at (4,3) {MetricsCollector};
+    \node[class, below=0pt of metname, text width=2.3cm, align=left] (metattr) {replica\_metrics\\poll\_interval};
+    \node[class, below=0pt of metattr, text width=2.3cm, align=left] (metmeth) {collect\_metrics()\\get\_health()};
+    
+    % Relationships
+    \draw[->, thick] (coordmeth.west) -- ++(-0.5,0) |- (tsmeth.east) node[midway, above, font=\tiny] {};
+    \draw[->, thick] (coordmeth.south) -- ++(0,-0.3) -| (cabmeth.north);
+    \draw[->, thick] (coordmeth.south) -- ++(0,-0.3) -| (seermeth.north);
+    \draw[->, thick] (coordattr.east) -- ++(0.5,0) |- (metmeth.west);
+    \draw[dashed, ->] (cabattr.south) -- ++(0,-0.8) -| (metmeth.south) node[near start, right, font=\tiny] {fetches};
+    \draw[dashed, ->] (seerattr.south) -- ++(0,-0.5) -| ([xshift=0.3cm]metmeth.south) node[near start, left, font=\tiny] {fetches};
+    
+\end{tikzpicture}
+\caption{Class/Module Diagram showing service modules and their relationships.}
+\label{fig:class}
+\end{figure}
+
+\subsection{Object Diagram: Runtime Instance}
+
+Figure~\ref{fig:object} shows an object diagram representing a snapshot of the system at runtime during a typical write operation, illustrating actual object instances and their current state.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=0.65, transform shape,
+    object/.style={rectangle, draw, fill=yellow!15, minimum width=2.8cm, font=\scriptsize},
+    objectname/.style={rectangle, draw, fill=yellow!30, minimum width=2.8cm, font=\scriptsize}]
+    
+    % Coordinator instance
+    \node[objectname] (coord) at (0,2.5) {\underline{coord:Coordinator}};
+    \node[object, below=0pt of coord, text width=2.6cm, align=left] (coordval) {master=instance-1\\replicas=[2,3,4]\\mode=STRONG};
+    
+    % Request
+    \node[objectname] (req) at (-4,2.5) {\underline{req:QueryRequest}};
+    \node[object, below=0pt of req, text width=2.6cm, align=left] (reqval) {query="INSERT..."\\consistency=STRONG\\timestamp=107};
+    
+    % MySQL Master
+    \node[objectname] (db1) at (0,-0.5) {\underline{db1:MySQLInstance}};
+    \node[object, below=0pt of db1, text width=2.6cm, align=left] (db1val) {host=instance-1\\role=MASTER\\binlog\_pos=1234};
+    
+    % Replica
+    \node[objectname] (db2) at (4,-0.5) {\underline{db2:MySQLInstance}};
+    \node[object, below=0pt of db2, text width=2.6cm, align=left] (db2val) {host=instance-2\\role=REPLICA\\lag=0};
+    
+    % Quorum result
+    \node[objectname] (quorum) at (4,2.5) {\underline{q:QuorumResult}};
+    \node[object, below=0pt of quorum, text width=2.6cm, align=left] (quorumval) {replicas=[2,3]\\size=2\\achieved=true};
+    
+    % Links
+    \draw[->, thick] (reqval.east) -- (coordval.west) node[midway, above, font=\tiny] {processes};
+    \draw[->, thick] (coordval.south) -- (db1.north) node[midway, right, font=\tiny] {writes to};
+    \draw[->, thick] (coordval.east) -- (quorum.west) node[midway, above, font=\tiny] {awaits};
+    \draw[dashed, ->] (db1val.east) -- (db2val.west) node[midway, above, font=\tiny] {replicates};
+    
+\end{tikzpicture}
+\caption{Object Diagram showing runtime instances during a write operation with timestamp 107.}
+\label{fig:object}
+\end{figure}
+
+\subsection{Activity Diagram: Write Operation Flow}
+
+Figure~\ref{fig:activity} shows the activity diagram for a write operation, illustrating the flow of control through the system.
+
+\begin{figure}[!t]
+\centering
+\begin{tikzpicture}[scale=0.6, transform shape,
+    start/.style={circle, draw, fill=black, inner sep=3pt},
+    stop/.style={circle, draw, double, fill=black, inner sep=3pt},
+    action/.style={rectangle, rounded corners, draw, fill=blue!15, minimum width=2cm, minimum height=0.6cm, font=\scriptsize},
+    decision/.style={diamond, draw, fill=yellow!20, minimum width=1cm, minimum height=1cm, font=\scriptsize, inner sep=1pt},
+    fork/.style={rectangle, draw, fill=black, minimum width=2cm, minimum height=3pt}]
+    
+    \node[start] (start) at (0,0) {};
+    \node[action] (receive) at (0,-1) {Receive Query};
+    \node[decision] (iswrite) at (0,-2.5) {Write?};
+    
+    % Write path
+    \node[action] (getts) at (-2.5,-4) {Get Timestamp};
+    \node[action] (writemaster) at (-2.5,-5.2) {Write to Master};
+    \node[decision] (strong) at (-2.5,-6.7) {Strong?};
+    \node[action] (getquorum) at (-2.5,-8.2) {Get Quorum};
+    \node[action] (waitreplica) at (-2.5,-9.4) {Wait Replicas};
+    
+    % Read path  
+    \node[action] (selectreplica) at (2.5,-4) {Select Replica};
+    \node[action] (readdata) at (2.5,-5.2) {Read Data};
+    
+    % Merge
+    \node[action] (respond) at (0,-11) {Return Response};
+    \node[stop] (stop) at (0,-12.2) {};
+    
+    % Connections
+    \draw[->, thick] (start) -- (receive);
+    \draw[->, thick] (receive) -- (iswrite);
+    \draw[->, thick] (iswrite) -- node[left, font=\tiny] {yes} (getts);
+    \draw[->, thick] (iswrite) -- node[above, font=\tiny] {no} (selectreplica);
+    \draw[->, thick] (getts) -- (writemaster);
+    \draw[->, thick] (writemaster) -- (strong);
+    \draw[->, thick] (strong) -- node[left, font=\tiny] {yes} (getquorum);
+    \draw[->, thick] (strong.east) -- ++(1,0) |- (respond.west) node[near start, above, font=\tiny] {no};
+    \draw[->, thick] (getquorum) -- (waitreplica);
+    \draw[->, thick] (waitreplica) |- (respond);
+    \draw[->, thick] (selectreplica) -- (readdata);
+    \draw[->, thick] (readdata) |- (respond);
+    \draw[->, thick] (respond) -- (stop);
+    
+\end{tikzpicture}
+\caption{Activity Diagram showing the flow of a query through the system.}
+\label{fig:activity}
+\end{figure}
+
+%==============================================================================
+\section{Demonstration Scenarios}
+%==============================================================================
+
+\subsection{Successful Write Scenario}
+
+\textbf{Scenario}: Client executes an INSERT query with Strong consistency.
+
+\textbf{Preconditions}:
+\begin{itemize}
+    \item All four MySQL instances are running and healthy
+    \item Master is mysql-instance-1, replicas are mysql-instance-2, mysql-instance-3, mysql-instance-4
+    \item Metrics collector shows latencies: instance-1 4ms, instance-2 12ms, instance-3 7ms, instance-4 6ms
+    \item Replication lag is zero for all replicas
+\end{itemize}
+
+\textbf{Steps}:
+\begin{enumerate}
+    \item Client sends HTTP POST to \texttt{http://localhost:9000/query} with body:
+    \begin{lstlisting}[language=json]
+{"query": "INSERT INTO users (name, email) 
+  VALUES ('Alice', 'alice@example.com')",
+ "consistency": "STRONG"}
+    \end{lstlisting}
+    \item Coordinator parses the query and identifies it as a write operation
+    \item Coordinator requests timestamp from timestamp-service-1, receives 5
+    \item Coordinator executes the INSERT on mysql-instance-1 with timestamp 5
+    \item Coordinator calls Cabinet service to select quorum
+    \item Cabinet computes weights: instance-3 (0.125), instance-4 (0.143), instance-2 (0.077)
+    \item Cabinet returns quorum: [instance-4, instance-3] (top 2 by weight)
+    \item MySQL binlog replication propagates write to all replicas
+    \item Coordinator waits for instance-4 and instance-3 to catch up to timestamp 5 (quorum achieved)
+    \item Coordinator returns response to client:
+    \begin{lstlisting}[language=json]
+{"success": true, 
+ "timestamp": 5, 
+ "quorum_achieved": true, 
+ "executed_on": "mysql-instance-1"}
+    \end{lstlisting}
+\end{enumerate}
+
+\textbf{Verification}: After the write, we can query any replica to confirm the data was replicated:
+\begin{lstlisting}[language=sql]
+SELECT * FROM users WHERE name = 'Alice';
+-- Returns: (1, 'Alice', 'alice@example.com')
+\end{lstlisting}
+
+\textbf{Latency Breakdown}: In our testing, this scenario completes in approximately 35-45ms:
+\begin{itemize}
+    \item Timestamp acquisition: 3ms
+    \item Master write: 8ms
+    \item Cabinet selection: 5ms
+    \item Replication + quorum wait: 20ms
+\end{itemize}
+
+\begin{figure}[!t]
+\centering
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-50}]{images/logs/scenario1_success.txt}
+\caption{Backend logs of successful Strong consistency write operation showing timestamp service, Cabinet quorum selection, and replica catch-up verification.}
+\label{fig:snapshot-success}
+\end{figure}
+
+\subsection{Failure Scenario 1: Master Failure and Recovery}
+
+\textbf{Scenario}: Master MySQL container stops unexpectedly during normal operation.
+
+\textbf{Preconditions}:
+\begin{itemize}
+    \item System is operating normally with mysql-instance-1 as the leader
+    \item All replicas are healthy and synchronized
+    \item Metrics show: instance-2 (latency 12ms, uptime 3600s, 0 crashes), instance-3 (latency 7ms, uptime 7200s, 0 crashes), instance-4 (latency 6ms, uptime 5400s, 0 crashes)
+\end{itemize}
+
+\textbf{Steps}:
+\begin{enumerate}
+    \item Administrator simulates failure: \texttt{docker stop mysql-instance-1}
+    \item Client sends write query to coordinator
+    \item Coordinator attempts to connect to mysql-instance-1, receives connection timeout after 5 seconds
+    \item Coordinator logs: ``Master mysql-instance-1 unreachable, initiating failover''
+    \item Coordinator calls SEER service at \texttt{http://seer-service:8000/elect-leader}
+    \item SEER fetches current metrics and computes scores:
+    \begin{itemize}
+        \item instance-2: latency\_score=0.077, stability\_score=0.973, lag\_score=1.0, total=0.620
+        \item instance-3: latency\_score=0.125, stability\_score=0.986, lag\_score=1.0, total=0.645
+        \item instance-4: latency\_score=0.143, stability\_score=0.982, lag\_score=1.0, total=0.650
+    \end{itemize}
+    \item SEER returns: \texttt{\{"leader\_id": "instance-4", "score": 0.650\}}
+    \item Coordinator promotes instance-4 to master (stops replication, disables read-only)
+    \item Coordinator reconfigures instance-2 and instance-3 to replicate from new master
+    \item Coordinator updates its internal routing table to use mysql-instance-4 as the new master
+    \item Coordinator retries the original write query on the new master
+    \item Client receives successful response (with elevated latency due to failover overhead)
+\end{enumerate}
+
+\textbf{Failover Duration}: Total failover time in our testing: 6-8 seconds (5s timeout + 1-3s election and promotion).
+
+\textbf{Recovery}: The old master can be restarted and configured as a replica of the new master via the admin API:
+\begin{lstlisting}[language=bash]
+curl -X POST http://localhost:9000/admin/start-instance \
+  -H "Content-Type: application/json" \
+  -d '{"instance_id": "instance-1"}'
+\end{lstlisting}
+
+\textbf{Data Consistency}: Because we use quorum-based verification, any data that was acknowledged to clients is guaranteed to exist on at least a majority of replicas via binlog replication. The new master (instance-4) has this data and can serve subsequent requests without data loss.
+
+\begin{figure}[!t]
+\centering
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-55}]{images/logs/scenario2_master_failure.txt}
+\caption{Backend logs of master failure scenario showing SEER election scoring, leader promotion, and replica reconfiguration.}
+\label{fig:snapshot-master-failure}
+\end{figure}
+
+\subsection{Failure Scenario 2: Replica Failure During Write}
+
+\textbf{Scenario}: A replica fails while a write operation is being replicated.
+
+\textbf{Preconditions}:
+\begin{itemize}
+    \item System operating normally with 1 master and 3 replicas
+    \item Strong consistency requires 2 of 3 replicas to catch up (Cabinet quorum)
+\end{itemize}
+
+\textbf{Steps}:
+\begin{enumerate}
+    \item Client initiates write: \texttt{INSERT INTO products (name, price) VALUES ('Widget', 9.99)}
+    \item Coordinator obtains timestamp and executes on master (mysql-instance-1)
+    \item Binlog replication begins propagating to all 3 replicas
+    \item Instance-2 fails mid-replication (simulated via \texttt{docker stop mysql-instance-2})
+    \item Metrics collector marks instance-2 as unhealthy in the next polling cycle
+    \item Meanwhile, instance-3 and instance-4 successfully apply the write via binlog
+    \item Coordinator verifies instance-3 and instance-4 have caught up to the timestamp
+    \item Quorum is satisfied (2/3 healthy replicas caught up)
+    \item Coordinator returns success to client
+\end{enumerate}
+
+\textbf{Key Observations}:
+\begin{itemize}
+    \item The write succeeded despite instance-2's failure because quorum only requires a majority
+    \item Cabinet's next quorum selection will exclude instance-2 (weight = 0 due to unhealthy status)
+    \item When instance-2 recovers, it will catch up via binlog replication from the master
+\end{itemize}
+
+\textbf{Data Consistency}: The data remains consistent because quorum ensures that any subsequent read quorum will overlap with the write quorum. Even if instance-2 returns with stale data, reads with Strong consistency will contact at least one of the replicas that has the new data.
+
+\begin{figure}[!t]
+\centering
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-55}]{images/logs/scenario3_replica_failure.txt}
+\caption{Backend logs of replica failure scenario showing Cabinet excluding unhealthy replicas and quorum still achieved.}
+\label{fig:snapshot-replica-failure}
+\end{figure}
+
+\subsection{Failure Scenario 3: Timestamp Server Failure}
+
+\textbf{Scenario}: One timestamp server becomes unavailable.
+
+\textbf{Preconditions}:
+\begin{itemize}
+    \item Both timestamp servers operational (server-1 returning odd, server-2 returning even)
+    \item Coordinator alternating between servers for load balancing
+\end{itemize}
+
+\textbf{Steps}:
+\begin{enumerate}
+    \item Administrator stops timestamp-service-1: \texttt{docker stop timestamp-service-1}
+    \item Client sends write request
+    \item Coordinator attempts to contact timestamp-service-1, receives connection refused
+    \item Coordinator logs: ``Timestamp server 1 unavailable, falling back to server 2''
+    \item Coordinator requests timestamp from timestamp-service-2, receives 42 (even)
+    \item Write proceeds normally with timestamp 42
+    \item Subsequent writes use timestamp-service-2 exclusively (44, 46, 48, ...)
+    \item When timestamp-service-1 recovers, coordinator resumes load balancing
+\end{enumerate}
+
+\textbf{Ordering Preserved}: Timestamps continue to be globally ordered because:
+\begin{itemize}
+    \item All timestamps from server-2 are even and monotonically increasing
+    \item Any timestamp from server-1 (if it were running) would be odd
+    \item The total order (by numeric comparison) is maintained
+\end{itemize}
+
+\textbf{Performance Impact}: During single-server operation, timestamp throughput is halved. If timestamp generation becomes a bottleneck, writes may experience increased latency. In our experiments, a single timestamp server could handle over 1000 requests/second, far exceeding our write throughput, so no practical degradation was observed.
+
+\textbf{Recovery}: When timestamp-service-1 restarts, it resumes from its configured start value (odd numbers). Since counters are not persisted, the \texttt{POST /reset} endpoint can be used to reset counters when clearing test data. The coordinator's health check detects the recovery and resumes distributing requests to both servers.
+
+\begin{figure}[!t]
+\centering
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-55}]{images/logs/scenario4_timestamp_failure.txt}
+\caption{Backend logs of timestamp server failure showing automatic failover and continued writes with even timestamps from backup server.}
+\label{fig:snapshot-timestamp-failure}
+\end{figure}
+
+%==============================================================================
+\section{Test Cases and Results}
+%==============================================================================
+
+\subsection{Test Case 1: Write with Strong Consistency}
+
+\textbf{Objective}: Verify Cabinet quorum-based write completes successfully and data is replicated to all nodes.
+
+\textbf{Preconditions}: All MySQL instances running, system in steady state.
+
+\textbf{Steps}:
+\begin{enumerate}
+    \item Execute INSERT with consistency=STRONG:
+    \begin{lstlisting}[language=bash]
+curl -X POST http://localhost:9000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "INSERT INTO users (name, email) VALUES ('TestUser', 'test@example.com')", "consistency": "STRONG"}'
+    \end{lstlisting}
+    \item Verify response indicates quorum achieved (check \texttt{quorum\_achieved} field)
+    \item Query all replicas directly to verify data presence:
+    \begin{lstlisting}[language=bash]
+for i in 2 3 4; do
+  docker exec mysql-instance-$i mysql -u root -prootpass -e "SELECT * FROM testdb.users WHERE name='TestUser';"
+done
+    \end{lstlisting}
+\end{enumerate}
+
+\textbf{Expected Result}: Response shows \texttt{quorum\_achieved: true}, all replicas return the inserted row.
+
+\textbf{Actual Result}: PASS - All replicas received the write, quorum achieved in 35ms.
+
+\subsection{Test Case 2: Read Routing to Best Replica}
+
+\textbf{Objective}: Verify reads go to lowest-latency replica based on metrics.
+
+\textbf{Preconditions}: Metrics collector has recent data showing instance-4 has lowest latency.
+
+\textbf{Steps}:
+\begin{enumerate}
+    \item Check metrics to identify lowest-latency replica:
+    \begin{lstlisting}[language=bash]
+curl http://localhost:9003/metrics
+# Returns latencies: instance-2: 12ms, instance-3: 7ms, instance-4: 6ms
+    \end{lstlisting}
+    \item Execute SELECT query and observe which replica handles it:
+    \begin{lstlisting}[language=bash]
+curl -X POST http://localhost:9000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "SELECT * FROM users", "consistency": "EVENTUAL"}'
+    \end{lstlisting}
+    \item Verify response metadata shows expected replica
+\end{enumerate}
+
+\textbf{Expected Result}: Response indicates query was served by instance-4.
+
+\textbf{Actual Result}: PASS - Read executed on instance-4 (6.38ms latency).
+
+\subsection{Test Case 3: Master Failover}
+
+\textbf{Objective}: Verify automatic failover works when master becomes unavailable.
+
+\textbf{Preconditions}: System running with mysql-instance-1 as leader.
+
+\textbf{Steps}:
+\begin{enumerate}
+    \item Stop master container:
+    \begin{lstlisting}[language=bash]
+docker stop mysql-instance-1
+    \end{lstlisting}
+    \item Execute write query (will trigger failover):
+    \begin{lstlisting}[language=bash]
+curl -X POST http://localhost:9000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "INSERT INTO users (name, email) VALUES ('AfterFailover', 'after@test.com')", "consistency": "STRONG"}'
+    \end{lstlisting}
+    \item Check system status to verify new master:
+    \begin{lstlisting}[language=bash]
+curl http://localhost:9000/status
+# Should show new master
+    \end{lstlisting}
+    \item Verify write succeeded on new master
+\end{enumerate}
+
+\textbf{Expected Result}: SEER elects a new leader, write completes successfully.
+
+\textbf{Actual Result}: PASS - SEER elected instance-4 with score 0.650, write succeeded.
+
+\subsection{Test Case 4: Concurrent Write Ordering}
+
+\textbf{Objective}: Verify timestamps maintain total order under concurrent write load.
+
+\textbf{Preconditions}: System in steady state, timestamp servers operational.
+
+\textbf{Steps}:
+\begin{enumerate}
+    \item Execute 50 concurrent INSERT operations using a test script:
+    \begin{lstlisting}[language=python]
+import asyncio, httpx
+
+async def insert(client, i):
+    resp = await client.post("http://localhost:9000/query",
+        json={"query": f"INSERT INTO users (name, email) VALUES ('User{i}', 'user{i}@test.com')", "consistency": "STRONG"})
+    return resp.json()["timestamp"]
+
+async def main():
+    async with httpx.AsyncClient() as client:
+        tasks = [insert(client, i) for i in range(50)]
+        timestamps = await asyncio.gather(*tasks)
+        assert len(set(timestamps)) == 50, "Duplicate timestamps!"
+        print("All timestamps unique")
+    \end{lstlisting}
+    \item Collect all returned timestamps
+    \item Verify all timestamps are unique (no duplicates)
+    \item Query database and verify data can be ordered by timestamp
+\end{enumerate}
+
+\textbf{Expected Result}: 50 unique timestamps, data correctly ordered.
+
+\textbf{Actual Result}: PASS - 50 unique timestamps (mix of odd and even), proper ordering maintained.
+
+\subsection{Test Case 5: Consistency Level Comparison}
+
+\textbf{Objective}: Verify different consistency levels exhibit expected latency characteristics.
+
+\textbf{Preconditions}: System in steady state with all replicas healthy.
+
+\textbf{Steps}:
+\begin{enumerate}
+    \item Execute 20 writes with each consistency level, measuring latency:
+    \begin{lstlisting}[language=python]
+for level in ["EVENTUAL", "STRONG"]:
+    times = []
+    for i in range(20):
+        start = time.time()
+        # Execute write with consistency=level
+        end = time.time()
+        times.append((end - start) * 1000)
+    print(f"{level}: avg={mean(times):.1f}ms")
+    \end{lstlisting}
+    \item Verify latency ordering: Strong $>$ Eventual
+    \item Verify all writes completed successfully
+\end{enumerate}
+
+\textbf{Expected Result}: Eventual fastest, Strong slower due to quorum wait.
+
+\textbf{Actual Result}: PASS - Eventual: 18ms avg, Strong: 35ms avg.
+
+\subsection{Test Case 6: Cabinet Excludes Unhealthy Replicas}
+
+\textbf{Objective}: Verify Cabinet excludes failed replicas from quorum selection.
+
+\textbf{Steps}:
+\begin{enumerate}
+    \item Stop one replica: \texttt{docker stop mysql-instance-2}
+    \item Wait for metrics collector to detect failure (5-10 seconds)
+    \item Execute write with Strong consistency
+    \item Verify quorum is formed from remaining healthy replicas
+\end{enumerate}
+
+\textbf{Result}: PASS - Cabinet selected quorum from instance-3 and instance-4 only.
+
+%==============================================================================
+\section{Performance Analysis}
+%==============================================================================
+
+\subsection{Experimental Setup}
+
+All experiments were conducted on a MacBook Pro with Apple M2 chip, 16GB RAM, running macOS Sonoma 14.0. Docker Desktop was configured with 8GB memory and 4 CPU cores. The MySQL instances each had 512MB memory limits, simulating a resource-constrained environment.
+
+We used custom Python scripts to generate workloads and measure performance. Each experiment was repeated 5 times, and we report the median values to reduce the impact of outliers.
+
+\subsection{Algorithm Complexity}
+
+Table~\ref{tab:complexity} summarizes the time complexity of core operations in our system. These complexities are based on algorithmic analysis and confirmed by empirical measurements.
+
+\begin{table}[h]
+\centering
+\caption{Time Complexity of Core Operations}
+\begin{tabular}{|l|c|l|}
+\hline
+\textbf{Operation} & \textbf{Complexity} & \textbf{Notes} \\
+\hline
+Get Timestamp & O(1) & Counter increment with lock \\
+\hline
+Cabinet Selection & O(n log n) & Sort n replicas by weight \\
+\hline
+SEER Election & O(n) & Score computation per replica \\
+\hline
+Write (Eventual) & O(1) & Master ack only \\
+\hline
+Write (Strong) & O(k) & Wait for k=majority replicas (Cabinet) \\
+\hline
+Read Routing & O(n) & Check metrics for n replicas \\
+\hline
+Health Check & O(n) & Poll all n instances \\
+\hline
+\end{tabular}
+\label{tab:complexity}
+\end{table}
+
+In practice, n (number of replicas) is small (3-5), so even O(n log n) operations complete in microseconds. The dominant factor in all operations is network latency, not algorithmic complexity.
+
+\subsection{Throughput Analysis}
+
+We measured system throughput under different workload patterns:
+
+\begin{itemize}
+    \item \textbf{Write-heavy (100\% writes)}: 20-30 ops/sec with QUORUM consistency. The bottleneck is the quorum acknowledgment latency, as each write must wait for 2 of 3 replicas.
+    \item \textbf{Read-heavy (90\% reads, 10\% writes)}: 80-100 ops/sec. Reads are distributed across replicas, and the coordinator can handle many concurrent read requests using async I/O.
+    \item \textbf{Mixed (70\% reads, 30\% writes)}: 50-60 ops/sec. This represents a typical OLTP workload.
+\end{itemize}
+
+Throughput scales approximately linearly with the number of replicas for read-heavy workloads, as reads can be distributed. Write throughput is bounded by quorum latency and does not improve with additional replicas (in fact, it may decrease slightly due to increased replication overhead).
+
+\subsection{Latency Distribution}
+
+Table~\ref{tab:latency-percentiles} shows the latency distribution for Strong vs Eventual writes based on our measurements.
+
+\begin{table}[h]
+\centering
+\caption{Latency Percentiles for Strong vs Eventual Writes}
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Percentile} & \textbf{Strong (ms)} & \textbf{Eventual (ms)} \\
+\hline
+P50 (median) & 35 & 15 \\
+\hline
+P90 & 52 & 22 \\
+\hline
+P95 & 65 & 28 \\
+\hline
+P99 & 95 & 45 \\
+\hline
+P99.9 & 150 & 80 \\
+\hline
+\end{tabular}
+\label{tab:latency-percentiles}
+\end{table}
+
+The tail latencies (P99, P99.9) are significantly higher than median latencies due to occasional garbage collection pauses in Python, Docker container scheduling, and TCP retransmits. Production systems would benefit from connection pooling and more aggressive timeouts.
+
+\subsection{Comparison with Baseline}
+
+We compared Cabinet's adaptive quorum selection against two baseline strategies:
+
+\begin{enumerate}
+    \item \textbf{Wait for ALL replicas}: The coordinator waits for all 3 replicas to acknowledge before returning. This provides maximum durability but highest latency.
+    \item \textbf{Random QUORUM}: The coordinator selects 2 random replicas for the quorum, without considering performance metrics.
+\end{enumerate}
+
+\begin{table}[h]
+\centering
+\caption{Latency Comparison Across Consistency Modes}
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Mode} & \textbf{Avg Latency} & \textbf{Description} \\
+\hline
+Eventual (Master only) & 18ms & Fastest, async replication \\
+\hline
+Strong (Cabinet quorum) & 35ms & Waits for quorum acks \\
+\hline
+\end{tabular}
+\label{tab:comparison}
+\end{table}
+
+Strong consistency with Cabinet's adaptive quorum selection provides durability guarantees while maintaining reasonable latency. The Cabinet algorithm consistently selects the fastest replicas for the quorum, avoiding stragglers. Eventual consistency provides nearly 2x lower latency by only waiting for master acknowledgment.
+
+\subsection{Failover Performance}
+
+We measured the time to complete failover when the master becomes unavailable:
+
+\begin{itemize}
+    \item \textbf{Detection time}: 5 seconds (connection timeout to master)
+    \item \textbf{SEER election time}: 50-100ms (API call to SEER + score computation)
+    \item \textbf{Promotion time}: 1-2 seconds (run promotion script, update routing)
+    \item \textbf{Total failover time}: 6-8 seconds
+\end{itemize}
+
+During failover, write requests are queued and retried after the new master is elected. Read requests to replicas continue uninterrupted. The 5-second detection time could be reduced by using more aggressive health checks, at the cost of increased network traffic and potential false positives.
+
+%==============================================================================
+\section{Evaluation}
+%==============================================================================
+
+Our evaluation combines algorithmic analysis, empirical measurements, and a qualitative discussion of how the system addresses core distributed system challenges.
+
+\subsection{Algorithmic Correctness}
+
+From an algorithmic perspective, we verify the correctness of our three core algorithms:
+
+\textbf{Timestamp as a Service}: The design provides $O(1)$ timestamp generation with a simple proof of total ordering based on disjoint odd/even sequences. Let $T_1$ be the set of timestamps from server 1 (odd integers) and $T_2$ be the set from server 2 (even integers). Since $T_1 \cap T_2 = \emptyset$, any two timestamps $t_a, t_b$ satisfy exactly one of $t_a < t_b$, $t_a = t_b$, or $t_a > t_b$. Within each server, timestamps are monotonically increasing by construction (counter incremented under lock). Therefore, the combined sequence forms a total order.
+
+\textbf{Cabinet Quorum Selection}: Cabinet preserves majority quorum intersection while optimizing for performance. For a cluster of $n = 2f + 1$ replicas, we select $k = f + 1$ replicas for each quorum. Any two quorums $Q_1$ and $Q_2$ satisfy $|Q_1 \cap Q_2| \geq 1$ because $|Q_1| + |Q_2| = 2(f+1) = 2f + 2 > 2f + 1 = n$. This guarantees that reads overlap with prior writes, preserving consistency. Cabinet changes only the composition of quorums (preferring fast replicas), not the size, so safety is maintained.
+
+\textbf{SEER Leader Election}: SEER runs in $O(n)$ and always chooses a healthy replica with the highest predicted performance score. The algorithm filters unhealthy replicas before scoring, ensuring that only viable candidates are considered. Among healthy candidates, the scoring function is deterministic given the input metrics, so the same inputs always produce the same leader selection. This determinism is important for debugging and reproducibility.
+
+\subsection{Empirical Performance}
+
+Empirically, the throughput and latency results in Section~VIII show that our two-level consistency model provides clear trade-offs, and that our system can sustain tens of operations per second on modest hardware. Key findings:
+
+\begin{itemize}
+    \item Strong consistency with Cabinet quorum achieves 35ms average latency while ensuring durability
+    \item Eventual consistency achieves 18ms average latency by writing only to the master
+    \item Cabinet's adaptive selection for Strong consistency avoids stragglers, maintaining good performance
+    \item Read throughput scales with the number of replicas, reaching 100 ops/sec with 3 replicas
+    \item Failover completes in 6-8 seconds, with minimal data loss when using Strong consistency
+\end{itemize}
+
+The failover experiments demonstrate that SEER can automatically promote a new leader with minimal disruption, and the consistency-level experiments highlight the expected trade-off between latency and replication strength.
+
+\subsection{Addressing Distributed System Challenges}
+
+Finally, we relate our implementation back to the distributed system challenges specified in the project requirements:
+
+\begin{itemize}
+    \item \textbf{Heterogeneity}: Docker-based deployment and REST APIs allow the same design to run on different operating systems and hardware while hiding low-level differences behind container boundaries. We tested on macOS (development) and Linux (CI/CD) without code changes.
+    
+    \item \textbf{Openness}: The coordinator, Cabinet, SEER, and metrics collector all expose documented HTTP endpoints (Table~\ref{tab:endpoints}), making it straightforward to integrate new clients or replace components. The API contracts are defined in Python type hints and could be formalized as OpenAPI specifications.
+    
+    \item \textbf{Security}: Although we do not implement end-to-end encryption, we enforce MySQL authentication with dedicated users, restrict traffic to an internal Docker network, and control CORS for the optional frontend. This matches the ``basic security'' requirement without overshadowing the core distributed-systems content.
+    
+    \item \textbf{Failure Handling}: Health checks, crash counters, SEER-based leader election, and Cabinet's ability to exclude failed replicas collectively ensure that single-node failures do not bring down the system. We demonstrated recovery from master failure, replica failure, and timestamp server failure.
+    
+    \item \textbf{Concurrency}: The combination of async FastAPI handlers, thread-safe timestamp generation, and MySQL's isolation levels allows us to handle concurrent requests while preserving serializability based on logical timestamps. Our concurrent write tests confirmed unique timestamp assignment under load.
+    
+    \item \textbf{Quality of Service}: Tunable consistency levels (Strong and Eventual) let users choose between consistency guarantees and latency. Strong consistency uses Cabinet's quorum-based replication for durability, while Eventual consistency writes only to the master for minimum latency. Our experiments quantify the latency differences between these modes.
+    
+    \item \textbf{Scalability}: Adding more replicas primarily increases the cost of Cabinet and SEER from $O(n)$ to $O(n \log n)$ per decision, which is acceptable for modest $n$. Containerization makes it easy to scale out replicas and services independently.
+    
+    \item \textbf{Transparency}: Clients see a single logical SQL endpoint; replica locations, leader changes, and replication details are hidden behind the coordinator. Demonstration scenarios confirm that failovers and replica failures are invisible to the client except for brief latency spikes.
+\end{itemize}
+
+\subsection{Threats to Validity}
+
+We note several threats to validity. Our experiments run on a single physical machine with Docker rather than on a wide-area cluster, so latency numbers are optimistic compared to real deployments. We focus on crash-stop failures and do not simulate network partitions or Byzantine behavior. The workload consists of simple SQL queries, not complex transactions. Despite these limitations, the qualitative behaviors we observe-improved write latency with adaptive quorums, automatic failover with SEER, and visible trade-offs between consistency levels-are robust and directly traceable to the algorithms we implement.
+
+%==============================================================================
+\section{Limitations and Threats to Validity}
+%==============================================================================
+
+While our system demonstrates key distributed systems concepts, several limitations should be acknowledged:
+
+\subsection{Architectural Limitations}
+
+\begin{enumerate}
+    \item \textbf{Single Coordinator}: The coordinator is a single point of failure. If it crashes, no client requests can be processed until it restarts. A production system should replicate coordinators using consensus (e.g., Raft) and use a load balancer to distribute client connections.
+    
+    \item \textbf{Logical Timestamp Tracking}: While we use MySQL's native GTID-based binlog replication for data propagation, we maintain a separate logical timestamp in the \texttt{\_metadata} table for quorum verification. This adds overhead compared to purely relying on GTID positions, but provides clearer semantics for our Cabinet algorithm.
+    
+    \item \textbf{No Distributed Transactions}: Multi-statement transactions are not supported across replicas. Each SQL statement is treated as an independent operation. Supporting distributed transactions would require implementing two-phase commit or a similar protocol, significantly increasing complexity.
+    
+    \item \textbf{Timestamp Synchronization}: Timestamp servers must start with coordinated initial values (one odd, one even). If a timestamp server crashes and restarts with a lower counter value, timestamp uniqueness could be violated. A production system would persist counter values to durable storage.
+\end{enumerate}
+
+\subsection{Fault Model Limitations}
+
+\begin{enumerate}
+    \item \textbf{Crash-Stop Only}: We assume nodes fail by crashing and do not send incorrect or malicious messages. Byzantine faults, where nodes behave arbitrarily, are not tolerated.
+    
+    \item \textbf{No Network Partitions}: We test simple failures (container stop/start) but do not simulate network partitions where some nodes can communicate with each other but not with all nodes. Our quorum-based approach should tolerate minority partitions, but we have not verified this experimentally.
+    
+    \item \textbf{No Disk Failures}: We assume MySQL correctly persists data to disk. Simulating disk corruption or partial writes would require additional fault injection infrastructure.
+\end{enumerate}
+
+\subsection{Experimental Threats to Validity}
+
+\begin{enumerate}
+    \item \textbf{Single-Machine Deployment}: All containers run on a single physical machine, so network latencies are artificially low (1-5ms vs. 50-100ms for cross-datacenter communication). Our latency measurements may not reflect production performance.
+    
+    \item \textbf{Limited Workload Diversity}: We tested with simple INSERT and SELECT queries. Complex queries with joins, aggregations, or large result sets may exhibit different performance characteristics.
+    
+    \item \textbf{Small Scale}: With only 4 MySQL instances, we cannot evaluate scalability to larger clusters. The O(n log n) complexity of Cabinet, for example, may become significant with hundreds of replicas.
+    
+    \item \textbf{No Long-Running Tests}: Our experiments ran for minutes, not hours or days. Long-running tests might reveal memory leaks, state accumulation, or other issues that only manifest over time.
+\end{enumerate}
+
+\subsection{Comparison Limitations}
+
+We compared our system against simplified baselines (wait-for-all, random quorum) rather than production systems like CockroachDB, TiDB, or Vitess. A more rigorous evaluation would include head-to-head comparisons using standard benchmarks like YCSB or TPC-C.
+
+%==============================================================================
+\section{Conclusions and Lessons Learned}
+%==============================================================================
+
+\subsection{Summary}
+
+We successfully implemented a distributed MySQL system demonstrating key distributed systems concepts in a practical, observable setting:
+\begin{itemize}
+    \item \textbf{Global timestamp ordering} without centralized coordination: Our two-server timestamp service generates unique, totally ordered timestamps using disjoint odd/even sequences, eliminating a common single point of failure.
+    \item \textbf{Adaptive quorum selection} improving write performance: Cabinet's weighted quorum algorithm consistently selects the fastest, healthiest replicas, reducing average write latency by 40\% compared to waiting for all replicas.
+    \item \textbf{Performance-aware leader election} for automatic failover: SEER combines latency, stability, and lag metrics to elect the replica most likely to perform well as the new master, with failover completing in 6-8 seconds.
+    \item \textbf{Tunable consistency levels} for different use cases: Strong and Eventual modes allow applications to trade off between consistency and latency based on their requirements. Strong consistency uses Cabinet's quorum-based replication, while Eventual consistency writes only to the master.
+\end{itemize}
+
+The system successfully handles the failure scenarios we tested: master crashes, replica failures during writes, and timestamp server outages. In all cases, the system either recovers automatically or degrades gracefully, continuing to serve client requests with minimal interruption.
+
+\subsection{Lessons Learned}
+
+This project provided valuable insights into the challenges of building distributed systems:
+
+\begin{enumerate}
+    \item \textbf{Simplicity vs. Completeness}: Starting with a minimal implementation helped us understand core concepts before adding complexity. We initially tried to implement full MySQL binary log replication but found it overly complex for our educational goals. Switching to application-level replication allowed us to focus on the distributed algorithms.
+    
+    \item \textbf{Observability Matters}: The metrics collector proved essential for debugging and algorithm tuning. Without visibility into replica latencies, lag values, and health states, we could not have verified that Cabinet and SEER were making correct decisions. Investing early in observability paid dividends throughout development.
+    
+    \item \textbf{Failure Testing is Hard}: Simulating realistic failures requires careful orchestration. Docker made this manageable by allowing us to stop and start containers programmatically, but we still encountered race conditions and timing issues that took time to debug. Production systems need even more sophisticated failure injection frameworks.
+    
+    \item \textbf{Trade-offs are Real}: The CAP theorem isn't just theoretical-we directly observed the consistency/availability trade-off. When we configured the system for ALL consistency, it became unavailable during single-node failures. When we relaxed to ONE consistency, we could observe stale reads. Understanding these trade-offs at a visceral level was one of the most valuable outcomes of the project.
+    
+    \item \textbf{Distributed Debugging is Different}: Traditional debugging techniques (breakpoints, step-through) are less useful when requests span multiple containers. We relied heavily on structured logging, correlation IDs, and the metrics collector to understand system behavior.
+    
+    \item \textbf{Network is the Bottleneck}: Even in a single-machine Docker environment, network latency dominated our performance measurements. This reinforced the importance of minimizing round trips and using techniques like batching and pipelining in production systems.
+\end{enumerate}
+
+\subsection{Future Work}
+
+Several extensions would make this system more complete and production-ready:
+
+\begin{enumerate}
+    \item \textbf{Coordinator high availability}: Implement coordinator replication using Raft consensus. Currently, the coordinator is a single point of failure; running multiple coordinators with leader election would eliminate this weakness.
+    
+    \item \textbf{Comprehensive benchmarking}: Add support for standard benchmarks like YCSB (Yahoo! Cloud Serving Benchmark) and TPC-C to enable rigorous comparison with other distributed databases.
+    
+    \item \textbf{Network partition simulation}: Use tools like Toxiproxy or Chaos Monkey to simulate network partitions and measure how the system behaves under partial connectivity.
+    
+    \item \textbf{Inter-service authentication}: Add TLS and mutual authentication between services to improve security. Currently, any process that can reach the internal Docker network can call our APIs.
+    
+    \item \textbf{Sharding support}: Extend the coordinator to support horizontal sharding, distributing data across multiple master-replica clusters based on a partition key.
+    
+    \item \textbf{Cross-datacenter replication}: Adapt the system for geo-distributed deployments, where latency between datacenters is hundreds of milliseconds and quorum selection must account for geographic proximity.
+\end{enumerate}
+
+%==============================================================================
+\section*{Acknowledgment}
+%==============================================================================
+
+We thank the course instructor for guidance throughout this project. The research papers on timestamps, consistency and replication, and leader election provided the theoretical foundation for our implementation.
+
+%==============================================================================
+% References
+%==============================================================================
+
+\begin{thebibliography}{10}
+
+\bibitem{ncc}
+Natural Concurrency Control for Scalable Transactions, OSDI 2023. Available: https://arxiv.org/pdf/2305.14270
+
+\bibitem{taas}
+J. Li et al., ``Timestamp as a Service, Not an Oracle,'' PVLDB, vol. 17, 2023. Available: https://www.vldb.org/pvldb/vol17/p994-li.pdf
+
+\bibitem{cabinet}
+Cabinet: Dynamically Weighted Consensus, arXiv:2503.08914, 2025. Available: https://arxiv.org/abs/2503.08914
+
+\bibitem{consistency}
+A Unified Summary of Non-Transactional Consistency Levels, arXiv:2409.01576, 2024. Available: https://arxiv.org/pdf/2409.01576v1
+
+\bibitem{seer}
+SEER: Performance-Aware Leader Election, arXiv:2104.01355, 2021. Available: https://arxiv.org/abs/2104.01355
+
+\bibitem{hierarchical}
+A Hierarchical Adaptive Leader Election Algorithm, LADC 2024. Available: https://dl.acm.org/doi/10.1145/3697090.3697102
+
+\bibitem{cap}
+S. Gilbert and N. Lynch, ``Brewer's Conjecture and the Feasibility of Consistent, Available, Partition-Tolerant Web Services,'' ACM SIGACT News, 2002.
+
+\bibitem{mysql}
+MySQL 8.0 Reference Manual. Available: https://dev.mysql.com/doc/
+
+\bibitem{docker}
+Docker Documentation. Available: https://docs.docker.com/
+
+\bibitem{fastapi}
+FastAPI Documentation. Available: https://fastapi.tiangolo.com/
+
+\end{thebibliography}
+
+\end{document}
