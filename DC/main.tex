@@ -36,7 +36,11 @@
     language=Python,
     keywordstyle=\color{blue},
     commentstyle=\color{gray},
-    stringstyle=\color{red}
+    stringstyle=\color{black},
+    columns=fullflexible,
+    keepspaces=true,
+    showstringspaces=false,
+    literate={-}{-}1
 }
 
 	\title{Distributed Database System with Logical Timestamps, Adaptive Quorums, and Performance-Aware Failover}
@@ -294,7 +298,8 @@ We expose a REST-style API:
 The \texttt{/query} endpoint accepts a JSON payload:
 \begin{lstlisting}[language=json,caption=Client API for Query Execution]
 {
-  "query": "SELECT * FROM users WHERE id = 1",
+  "query": "SELECT * FROM users
+            WHERE id = 1",
   "consistency": "STRONG | EVENTUAL"
 }
 \end{lstlisting}
@@ -1141,9 +1146,11 @@ Figure~\ref{fig:activity} shows the activity diagram for a write operation, illu
 \begin{enumerate}
     \item Client sends HTTP POST to \texttt{http://localhost:9000/query} with body:
     \begin{lstlisting}[language=json]
-{"query": "INSERT INTO users (name, email) 
-  VALUES ('Alice', 'alice@example.com')",
- "consistency": "STRONG"}
+{
+  "query": "INSERT INTO users (name, email)
+            VALUES ('Alice', 'alice@example.com')",
+  "consistency": "STRONG"
+}
     \end{lstlisting}
     \item Coordinator parses the query and identifies it as a write operation
     \item Coordinator requests timestamp from timestamp-service-1, receives 5
@@ -1155,16 +1162,19 @@ Figure~\ref{fig:activity} shows the activity diagram for a write operation, illu
     \item Coordinator waits for instance-4 and instance-3 to catch up to timestamp 5 (quorum achieved)
     \item Coordinator returns response to client:
     \begin{lstlisting}[language=json]
-{"success": true, 
- "timestamp": 5, 
- "quorum_achieved": true, 
- "executed_on": "mysql-instance-1"}
+{
+  "success": true,
+  "timestamp": 5,
+  "quorum_achieved": true,
+  "executed_on": "mysql-instance-1"
+}
     \end{lstlisting}
 \end{enumerate}
 
 \textbf{Verification}: After the write, we can query any replica to confirm the data was replicated:
 \begin{lstlisting}[language=sql]
-SELECT * FROM users WHERE name = 'Alice';
+SELECT * FROM users
+WHERE name = 'Alice';
 -- Returns: (1, 'Alice', 'alice@example.com')
 \end{lstlisting}
 
@@ -1178,7 +1188,7 @@ SELECT * FROM users WHERE name = 'Alice';
 
 \begin{figure}[!t]
 \centering
-\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-50}]{images/logs/scenario1_success.txt}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=fullflexible, keepspaces=true, language={}, linerange={1-50}]{images/logs/scenario1_success.txt}
 \caption{Backend logs of successful Strong consistency write operation showing timestamp service, Cabinet quorum selection, and replica catch-up verification.}
 \label{fig:snapshot-success}
 \end{figure}
@@ -1203,11 +1213,14 @@ SELECT * FROM users WHERE name = 'Alice';
     \item Coordinator calls SEER service at \texttt{http://seer-service:8000/elect-leader}
     \item SEER fetches current metrics and computes scores:
     \begin{itemize}
-        \item instance-2: latency\_score=0.077, stability\_score=0.973, lag\_score=1.0, total=0.620
-        \item instance-3: latency\_score=0.125, stability\_score=0.986, lag\_score=1.0, total=0.645
-        \item instance-4: latency\_score=0.143, stability\_score=0.982, lag\_score=1.0, total=0.650
+        \item instance-2: latency=0.077, stability=0.973, lag=1.0, \textbf{total=0.620}
+        \item instance-3: latency=0.125, stability=0.986, lag=1.0, \textbf{total=0.645}
+        \item instance-4: latency=0.143, stability=0.982, lag=1.0, \textbf{total=0.650}
     \end{itemize}
-    \item SEER returns: \texttt{\{"leader\_id": "instance-4", "score": 0.650\}}
+    \item SEER returns the election result:
+    \begin{lstlisting}[language=json,basicstyle=\ttfamily\tiny]
+{"leader_id": "instance-4", "score": 0.650}
+    \end{lstlisting}
     \item Coordinator promotes instance-4 to master (stops replication, disables read-only)
     \item Coordinator reconfigures instance-2 and instance-3 to replicate from new master
     \item Coordinator updates its internal routing table to use mysql-instance-4 as the new master
@@ -1219,7 +1232,8 @@ SELECT * FROM users WHERE name = 'Alice';
 
 \textbf{Recovery}: The old master can be restarted and configured as a replica of the new master via the admin API:
 \begin{lstlisting}[language=bash]
-curl -X POST http://localhost:9000/admin/start-instance \
+curl -X POST \
+  http://localhost:9000/admin/start-instance \
   -H "Content-Type: application/json" \
   -d '{"instance_id": "instance-1"}'
 \end{lstlisting}
@@ -1228,7 +1242,7 @@ curl -X POST http://localhost:9000/admin/start-instance \
 
 \begin{figure}[!t]
 \centering
-\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-55}]{images/logs/scenario2_master_failure.txt}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=fullflexible, keepspaces=true, language={}, linerange={1-55}]{images/logs/scenario2_master_failure.txt}
 \caption{Backend logs of master failure scenario showing SEER election scoring, leader promotion, and replica reconfiguration.}
 \label{fig:snapshot-master-failure}
 \end{figure}
@@ -1245,7 +1259,11 @@ curl -X POST http://localhost:9000/admin/start-instance \
 
 \textbf{Steps}:
 \begin{enumerate}
-    \item Client initiates write: \texttt{INSERT INTO products (name, price) VALUES ('Widget', 9.99)}
+    \item Client initiates write:
+    \begin{lstlisting}[language=sql,basicstyle=\ttfamily\tiny]
+INSERT INTO products (name, price)
+VALUES ('Widget', 9.99)
+    \end{lstlisting}
     \item Coordinator obtains timestamp and executes on master (mysql-instance-1)
     \item Binlog replication begins propagating to all 3 replicas
     \item Instance-2 fails mid-replication (simulated via \texttt{docker stop mysql-instance-2})
@@ -1267,7 +1285,7 @@ curl -X POST http://localhost:9000/admin/start-instance \
 
 \begin{figure}[!t]
 \centering
-\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-55}]{images/logs/scenario3_replica_failure.txt}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=fullflexible, keepspaces=true, language={}, linerange={1-55}]{images/logs/scenario3_replica_failure.txt}
 \caption{Backend logs of replica failure scenario showing Cabinet excluding unhealthy replicas and quorum still achieved.}
 \label{fig:snapshot-replica-failure}
 \end{figure}
@@ -1307,7 +1325,7 @@ curl -X POST http://localhost:9000/admin/start-instance \
 
 \begin{figure}[!t]
 \centering
-\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=flexible, language={}, linerange={1-55}]{images/logs/scenario4_timestamp_failure.txt}
+\lstinputlisting[basicstyle=\ttfamily\tiny, frame=single, breaklines=true, columns=fullflexible, keepspaces=true, language={}, linerange={1-55}]{images/logs/scenario4_timestamp_failure.txt}
 \caption{Backend logs of timestamp server failure showing automatic failover and continued writes with even timestamps from backup server.}
 \label{fig:snapshot-timestamp-failure}
 \end{figure}
@@ -1328,13 +1346,20 @@ curl -X POST http://localhost:9000/admin/start-instance \
     \begin{lstlisting}[language=bash]
 curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "INSERT INTO users (name, email) VALUES ('TestUser', 'test@example.com')", "consistency": "STRONG"}'
+  -d '{
+    "query": "INSERT INTO users (name, email)
+              VALUES ('TestUser', 'test@example.com')",
+    "consistency": "STRONG"
+  }'
     \end{lstlisting}
     \item Verify response indicates quorum achieved (check \texttt{quorum\_achieved} field)
     \item Query all replicas directly to verify data presence:
     \begin{lstlisting}[language=bash]
 for i in 2 3 4; do
-  docker exec mysql-instance-$i mysql -u root -prootpass -e "SELECT * FROM testdb.users WHERE name='TestUser';"
+  docker exec mysql-instance-$i mysql \
+    -u root -prootpass \
+    -e "SELECT * FROM testdb.users
+        WHERE name='TestUser';"
 done
     \end{lstlisting}
 \end{enumerate}
@@ -1354,13 +1379,19 @@ done
     \item Check metrics to identify lowest-latency replica:
     \begin{lstlisting}[language=bash]
 curl http://localhost:9003/metrics
-# Returns latencies: instance-2: 12ms, instance-3: 7ms, instance-4: 6ms
+# Returns latencies:
+#   instance-2: 12ms
+#   instance-3: 7ms
+#   instance-4: 6ms
     \end{lstlisting}
     \item Execute SELECT query and observe which replica handles it:
     \begin{lstlisting}[language=bash]
 curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "SELECT * FROM users", "consistency": "EVENTUAL"}'
+  -d '{
+    "query": "SELECT * FROM users",
+    "consistency": "EVENTUAL"
+  }'
     \end{lstlisting}
     \item Verify response metadata shows expected replica
 \end{enumerate}
@@ -1385,7 +1416,11 @@ docker stop mysql-instance-1
     \begin{lstlisting}[language=bash]
 curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "INSERT INTO users (name, email) VALUES ('AfterFailover', 'after@test.com')", "consistency": "STRONG"}'
+  -d '{
+    "query": "INSERT INTO users (name, email)
+              VALUES ('AfterFailover', 'after@test.com')",
+    "consistency": "STRONG"
+  }'
     \end{lstlisting}
     \item Check system status to verify new master:
     \begin{lstlisting}[language=bash]
@@ -1412,15 +1447,19 @@ curl http://localhost:9000/status
 import asyncio, httpx
 
 async def insert(client, i):
-    resp = await client.post("http://localhost:9000/query",
-        json={"query": f"INSERT INTO users (name, email) VALUES ('User{i}', 'user{i}@test.com')", "consistency": "STRONG"})
+    query = f"INSERT INTO users (name, email) "
+    query += f"VALUES ('User{i}', 'user{i}@test.com')"
+    resp = await client.post(
+        "http://localhost:9000/query",
+        json={"query": query, "consistency": "STRONG"}
+    )
     return resp.json()["timestamp"]
 
 async def main():
     async with httpx.AsyncClient() as client:
         tasks = [insert(client, i) for i in range(50)]
         timestamps = await asyncio.gather(*tasks)
-        assert len(set(timestamps)) == 50, "Duplicate timestamps!"
+        assert len(set(timestamps)) == 50
         print("All timestamps unique")
     \end{lstlisting}
     \item Collect all returned timestamps
