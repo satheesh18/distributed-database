@@ -257,18 +257,19 @@ docker-compose down
 ### Keyaba Gohil
 - Designed and implemented the SEER leader election algorithm and service
 - Implementation of the metrics collector service  
-- Developed the promotion and demotion scripts for failover    
+- Developed the automatic failover workflow and replica reconfiguration logic
+- Contributed to system testing and integration validation 
 
 ### Jayateerth Kamatgi
 - Designed and implemented the Cabinet quorum selection algorithm and service  
-- Configured MySQL deployment including Dockerfiles and initialization scripts  
+- Configured MySQL instances and initialization scripts for replication
+- Developed tunable consistency enabling users to choose between speed and durability
 - Implemented health monitoring, latency measurement, and lag tracking  
-- Contributed to system testing and failure scenario demonstrations 
 
 ### Satheesh Kumar G R 
 - Designed and implemented the timestamp service for both instances 
 - Implemented the coordinator service including query parsing and routing  
-- Integrated all microservices and coordinated the Docker Compose setup  
+- Integrated all microservices and orchestrated the Docker Compose configuration  
 - Developed the stress test script and concurrent write tests  
 
 
