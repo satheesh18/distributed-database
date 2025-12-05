@@ -726,8 +726,9 @@ async def handle_read_query(query: str, consistency: ConsistencyLevel) -> QueryR
     """
     Handle a read query with tunable consistency.
     
-    - EVENTUAL: Read from replica (fast, may be stale)
-    - STRONG: Read from master (guaranteed fresh)
+    - EVENTUAL: Read from lowest-latency healthy replica (fast, may be stale)
+    - STRONG: Read from best replica using Cabinet algorithm (same logic as quorum writes)
+             Falls back to master if Cabinet fails or replica is unavailable
     """
     start_time = time.time()
     
@@ -816,11 +817,46 @@ async def handle_read_query(query: str, consistency: ConsistencyLevel) -> QueryR
         )
     
     else:  # ConsistencyLevel.STRONG
-        # STRONG: Read from master for guaranteed fresh data
+        # STRONG: Read from best replica (same logic as quorum writes) for load distribution
+        # Falls back to master if no healthy replicas available
         with state_lock:
             master_host = current_master["host"]
+            replicas = current_replicas.copy()
         
-        result = execute_query_on_host(master_host, query)
+        read_host = master_host  # Default fallback
+        
+        # Try to get best replica from Cabinet service (same logic as quorum writes)
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{CABINET_SERVICE_URL}/select-quorum",
+                    json={"operation": "read"},
+                    timeout=2.0
+                )
+                if response.status_code == 200:
+                    quorum_data = response.json()
+                    quorum_replicas = quorum_data.get("quorum", [])
+                    
+                    if quorum_replicas:
+                        # Get the best replica (first in the sorted list from Cabinet)
+                        best_replica_id = quorum_replicas[0]
+                        
+                        # Find the replica host
+                        for r in replicas:
+                            if r["id"] == best_replica_id:
+                                read_host = r["host"]
+                                print(f"Strong read routing: selected {best_replica_id} (Cabinet best replica)")
+                                break
+        except Exception as e:
+            print(f"Failed to get Cabinet quorum for read, falling back to master: {e}")
+        
+        result = execute_query_on_host(read_host, query)
+        
+        # Fallback to master if selected replica fails
+        if not result["success"] and read_host != master_host:
+            print(f"Replica read failed, falling back to master: {result.get('error')}")
+            result = execute_query_on_host(master_host, query)
+            read_host = master_host
         
         if not result["success"]:
             with metrics_lock:
@@ -838,10 +874,10 @@ async def handle_read_query(query: str, consistency: ConsistencyLevel) -> QueryR
         
         return QueryResponse(
             success=True,
-            message="Read successful (strong consistency - latest data)",
+            message="Read successful (strong consistency - from best replica)",
             data=result["data"],
             rows_affected=len(result["data"]) if result["data"] else 0,
-            executed_on=master_host,
+            executed_on=read_host,
             consistency_level="STRONG",
             latency_ms=round(latency_ms, 2)
         )

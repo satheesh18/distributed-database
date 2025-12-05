@@ -280,7 +280,7 @@ Our methodology follows the plan outlined in our original project proposal. We f
 
 When a client issues a write, it is first received by the coordinator, which contacts our distributed timestamp service to obtain a globally ordered logical timestamp. The coordinator forwards the write and timestamp to the current MySQL master, which executes the statement and records the timestamp in a metadata table. MySQL's native GTID-based binlog replication then propagates the write to all replicas asynchronously. The coordinator invokes the Cabinet service to select a high-quality quorum of replicas based on current performance metrics, then polls these replicas until they have caught up to the write's timestamp before confirming success to the client.
 
-For reads, the coordinator inspects replica metrics to choose an appropriate target. For strongly consistent reads, it only uses replicas whose last-applied timestamp is at least as recent as the requested version. For more latency-sensitive reads, it can deliberately choose slightly stale replicas. When the master fails, the coordinator calls the SEER service, which scores all healthy replicas using latency, lag, uptime, and crash history and selects a new leader. The coordinator then updates its routing state and resumes handling client requests.
+For reads, the coordinator inspects replica metrics to choose an appropriate target. For strongly consistent reads, it uses the same Cabinet algorithm as writes to select the best replica based on latency and replication lag, ensuring reads go to replicas that participated in the write quorum. For eventual consistency reads, it routes to the lowest-latency healthy replica. When the master fails, the coordinator calls the SEER service, which scores all healthy replicas using latency, lag, uptime, and crash history and selects a new leader. The coordinator then updates its routing state and resumes handling client requests.
 
 This phased methodology-from algorithm selection and microservice decomposition to coordinated read/write workflows and failover handling-mirrors the ``Methodology and Architecture'' section of our proposal and provides a clear separation between core algorithms and system glue.
 
@@ -306,43 +306,49 @@ The \texttt{/query} endpoint accepts a JSON payload:
 
 The \texttt{consistency} field controls how the coordinator treats the operation:
 \begin{itemize}
-    \item \textbf{Eventual}: For writes, the coordinator waits only for the master to apply the update before replying. Replication to replicas happens asynchronously. For reads, the coordinator may route to any healthy replica, even if it is slightly behind. This minimizes latency but allows bounded staleness.
-    \item \textbf{Strong}: For writes, the coordinator uses Cabinet's quorum-based replication, waiting for acknowledgments from a majority of replicas selected based on performance metrics. For reads, it prefers replicas whose last-applied timestamp is at least as recent as the quorum-committed timestamp, providing strong read-after-write consistency.
+    \item \textbf{Eventual}: For writes, the coordinator waits only for the master to apply the update before replying. Replication to replicas happens asynchronously. For reads, the coordinator routes to the lowest-latency healthy replica. This minimizes latency but allows bounded staleness.
+    \item \textbf{Strong}: For writes, the coordinator uses Cabinet's quorum-based replication, waiting for acknowledgments from a majority of replicas selected based on performance metrics. For reads, it uses the same Cabinet algorithm to select the best replica, ensuring reads go to replicas that participated in the write quorum and have the latest data. This provides strong read-after-write consistency while distributing read load.
 \end{itemize}
 
 Formally, Strong consistency provides linearizable semantics for single-key operations as long as a majority of replicas remain connected. Eventual consistency provides lower latency at the cost of potential staleness, and the experiments in Section~VIII show the expected latency/consistency trade-off across these modes.
 
 \subsection{Read Routing Algorithm}
 
-The coordinator's read path combines consistency semantics with performance-driven routing. Before each read, the coordinator:
-\begin{enumerate}
-    \item Fetches the latest metrics for all replicas from the metrics collector (latency, lag, health status).
-    \item Filters out any replicas marked unhealthy or whose last-applied timestamp is too far behind the master for the requested consistency level.
-    \item Selects the best remaining replica according to a simple scoring function inspired by Cabinet.
-\end{enumerate}
+The coordinator's read path combines consistency semantics with performance-driven routing. Critically, we use the same Cabinet algorithm for both writes and strong reads, ensuring consistency through quorum overlap.
+
+\textbf{Eventual Consistency Reads}: The coordinator fetches metrics and routes to the lowest-latency healthy replica, prioritizing performance over freshness.
+
+\textbf{Strong Consistency Reads}: The coordinator calls the Cabinet service (the same endpoint used for writes) to get the best replicas ranked by latency and replication lag. It then reads from the top-ranked replica. This ensures that strong reads go to the same high-quality replicas that received the quorum writes.
 
 In pseudocode, the read routing logic is:
-\begin{lstlisting}[caption=Read Routing Based on Metrics]
+\begin{lstlisting}[caption=Read Routing Based on Consistency Level]
 def route_read(query, consistency):
-    metrics = get_metrics_from_collector()
-    candidates = []
-    for replica in metrics.replicas:
-        if not replica.is_healthy:
-            continue
-        # Enforce freshness based on mode
-        if consistency == "STRONG":
-            if replica.last_ts < metrics.master_last_ts:
-                continue
-        candidates.append(replica)
-    # Fallback: if all were filtered, allow best-effort
-    if not candidates:
-        candidates = [r for r in metrics.replicas if r.is_healthy]
-    # Choose lowest-latency candidate
-    target = min(candidates, key=lambda r: r.latency_ms)
-    return execute_query_on(target, query)
+    if consistency == "EVENTUAL":
+        # Route to lowest-latency healthy replica
+        metrics = get_metrics_from_collector()
+        healthy = [r for r in metrics.replicas
+                   if r.is_healthy]
+        healthy.sort(key=lambda r: r.latency_ms)
+        target = healthy[0] if healthy else master
+        return execute_query_on(target, query)
+    else:  # STRONG
+        # Use Cabinet algorithm (same as writes)
+        quorum = cabinet.select_quorum("read")
+        best_replica = quorum[0]  # Highest ranked
+        result = execute_query_on(best_replica, query)
+        if result.failed:
+            # Fallback to master
+            return execute_query_on(master, query)
+        return result
 \end{lstlisting}
 
-This algorithm is $O(n)$ in the number of replicas and ensures that, under Strong consistency, reads observe at least the master's most recent committed timestamp whenever a suitable replica exists. Under Eventual consistency, we relax the timestamp filter and instead emphasize latency, which is consistent with the weaker guarantees.
+This design has two key benefits:
+\begin{enumerate}
+    \item \textbf{Consistency through quorum overlap}: Since strong writes wait for Cabinet-selected replicas to catch up, reading from the same replicas guarantees access to the latest committed data.
+    \item \textbf{Load distribution}: Instead of always hitting the master for strong reads, load is distributed across the best-performing replicas.
+\end{enumerate}
+
+The algorithm is $O(n)$ in the number of replicas. Under Eventual consistency, we prioritize latency over freshness. Under Strong consistency, we leverage Cabinet's scoring to read from replicas that are both fast and up-to-date.
 
 \subsection{Failure Detection and Health Monitoring}
 
@@ -481,7 +487,7 @@ The central component that receives all client SQL queries and orchestrates the 
     \item \textbf{Timestamp acquisition}: Contacts one of the two timestamp servers to obtain a globally ordered timestamp for write operations
     \item \textbf{Write execution}: Executes writes on the current master, then replicates to replicas based on the consistency level
     \item \textbf{Quorum coordination}: Calls the Cabinet service to determine which replicas to include in the write quorum, then polls those replicas until they catch up to the write's timestamp via binlog replication
-    \item \textbf{Read routing}: Selects the best replica for read operations based on current metrics (latency, lag, health)
+    \item \textbf{Read routing}: For eventual consistency, selects the lowest-latency healthy replica. For strong consistency, uses Cabinet algorithm to select the best replica (same logic as quorum writes)
     \item \textbf{Failover handling}: Detects master failures, calls SEER for leader election, and promotes the winning replica to master
     \item \textbf{Status reporting}: Exposes \texttt{/status} and \texttt{/health} endpoints for monitoring and observability
 \end{itemize}
@@ -1281,7 +1287,7 @@ VALUES ('Widget', 9.99)
     \item When instance-2 recovers, it will catch up via binlog replication from the master
 \end{itemize}
 
-\textbf{Data Consistency}: The data remains consistent because quorum ensures that any subsequent read quorum will overlap with the write quorum. Even if instance-2 returns with stale data, reads with Strong consistency will contact at least one of the replicas that has the new data.
+\textbf{Data Consistency}: The data remains consistent because quorum ensures that any subsequent strong read will go to one of the Cabinet-selected replicas that received the write. Since strong reads use the same Cabinet algorithm as writes, they are routed to the highest-quality replicas---the same ones that participated in the write quorum.
 
 \begin{figure}[!t]
 \centering
@@ -1370,13 +1376,13 @@ done
 
 \subsection{Test Case 2: Read Routing to Best Replica}
 
-\textbf{Objective}: Verify reads go to lowest-latency replica based on metrics.
+\textbf{Objective}: Verify reads are routed appropriately based on consistency level---eventual reads go to lowest-latency replica, strong reads use Cabinet algorithm.
 
 \textbf{Preconditions}: Metrics collector has recent data showing instance-4 has lowest latency.
 
 \textbf{Steps}:
 \begin{enumerate}
-    \item Check metrics to identify lowest-latency replica:
+    \item Check metrics to identify replica rankings:
     \begin{lstlisting}[language=bash]
 curl http://localhost:9003/metrics
 # Returns latencies:
@@ -1384,7 +1390,7 @@ curl http://localhost:9003/metrics
 #   instance-3: 7ms
 #   instance-4: 6ms
     \end{lstlisting}
-    \item Execute SELECT query and observe which replica handles it:
+    \item Execute SELECT query with EVENTUAL consistency:
     \begin{lstlisting}[language=bash]
 curl -X POST http://localhost:9000/query \
   -H "Content-Type: application/json" \
@@ -1393,12 +1399,25 @@ curl -X POST http://localhost:9000/query \
     "consistency": "EVENTUAL"
   }'
     \end{lstlisting}
-    \item Verify response metadata shows expected replica
+    \item Execute SELECT query with STRONG consistency:
+    \begin{lstlisting}[language=bash]
+curl -X POST http://localhost:9000/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "SELECT * FROM users",
+    "consistency": "STRONG"
+  }'
+    \end{lstlisting}
+    \item Verify response metadata shows expected replica for each
 \end{enumerate}
 
-\textbf{Expected Result}: Response indicates query was served by instance-4.
+\textbf{Expected Result}: 
+\begin{itemize}
+    \item EVENTUAL: Routes to instance-4 (lowest latency)
+    \item STRONG: Routes to Cabinet-selected best replica (considers both latency and replication lag)
+\end{itemize}
 
-\textbf{Actual Result}: PASS - Read executed on instance-4 (6.38ms latency).
+\textbf{Actual Result}: PASS - Eventual read executed on instance-4 (6.38ms latency). Strong read executed on Cabinet-selected replica with best combined score.
 
 \subsection{Test Case 3: Master Failover}
 
@@ -1597,8 +1616,8 @@ The tail latencies (P99, P99.9) are significantly higher than median latencies d
 We compared our two consistency modes to understand the performance trade-offs:
 
 \begin{itemize}
-    \item \textbf{Eventual}: Writes are executed on the master only, with asynchronous binlog replication to replicas. This provides the lowest latency but allows reading stale data from replicas.
-    \item \textbf{Strong}: Writes are executed on the master, then the coordinator waits for Cabinet-selected quorum replicas to catch up via binlog replication before returning success. This ensures durability and read-after-write consistency.
+    \item \textbf{Eventual}: Writes are executed on the master only, with asynchronous binlog replication to replicas. Reads are routed to the lowest-latency healthy replica. This provides the lowest latency but allows reading stale data.
+    \item \textbf{Strong}: Writes are executed on the master, then the coordinator waits for Cabinet-selected quorum replicas to catch up via binlog replication before returning success. Reads use the same Cabinet algorithm to select the best replica, ensuring they go to replicas that have the latest data. This ensures durability and read-after-write consistency while distributing read load.
 \end{itemize}
 
 \begin{table}[h]
