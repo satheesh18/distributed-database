@@ -55,7 +55,7 @@ def verify_system():
         print(f"  ✓ Replicas: {', '.join(status['replicas'])}")
         
         # Check metrics
-        response = requests.get("http://localhost:8003/metrics", timeout=5)
+        response = requests.get("http://localhost:9003/metrics", timeout=5)
         metrics = response.json()
         print(f"  ✓ Tracking {len(metrics['replicas'])} replicas")
         
